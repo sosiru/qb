@@ -1,0 +1,401 @@
+{
+  "info": {
+    "name": "Route MVP",
+    "_postman_id": "9a7f4f8a-53a1-4dbc-b28b-7f4f95cd1234",
+    "description": "Postman collection for the Route (Bundl Pay) MVP backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8006/api/v1" },
+    { "key": "token", "value": "" },
+    { "key": "checker_token", "value": "" },
+    { "key": "organization_id", "value": "" },
+    { "key": "checker_user_id", "value": "" },
+    { "key": "payee_id", "value": "" },
+    { "key": "schedule_id", "value": "" },
+    { "key": "membership_id", "value": "" },
+    { "key": "batch_id", "value": "" },
+    { "key": "integration_api_key_id", "value": "" },
+    { "key": "integration_secret", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/health/"
+      }
+    },
+    {
+      "name": "Register Individual",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone_number\": \"+254700000001\",\n  \"password\": \"StrongPass123!\",\n  \"full_name\": \"Alice Example\",\n  \"account_type\": \"INDIVIDUAL\",\n  \"default_payment_mode\": \"WALLET\"\n}"
+        },
+        "url": "{{base_url}}/auth/register/"
+      }
+    },
+    {
+      "name": "Register Corporate Admin",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone_number\": \"+254700000010\",\n  \"password\": \"StrongPass123!\",\n  \"full_name\": \"Finance Admin\",\n  \"account_type\": \"CORPORATE\",\n  \"organization_name\": \"Bundl Labs\"\n}"
+        },
+        "url": "{{base_url}}/auth/register/"
+      }
+    },
+    {
+      "name": "Register Corporate Checker",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone_number\": \"+254700000011\",\n  \"password\": \"StrongPass123!\",\n  \"full_name\": \"Checker User\",\n  \"account_type\": \"CORPORATE\"\n}"
+        },
+        "url": "{{base_url}}/auth/register/"
+      }
+    },
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone_number\": \"+254700000001\",\n  \"password\": \"StrongPass123!\"\n}"
+        },
+        "url": "{{base_url}}/auth/login/"
+      }
+    },
+    {
+      "name": "Get Me",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/auth/me/"
+      }
+    },
+    {
+      "name": "Update My Profile",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"full_name\": \"Alice Example Updated\",\n  \"default_payment_mode\": \"STK\",\n  \"sms_notifications_enabled\": true,\n  \"email_notifications_enabled\": true\n}"
+        },
+        "url": "{{base_url}}/auth/me/"
+      }
+    },
+    {
+      "name": "Get Me Via API Key",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-API-Key", "value": "{{integration_secret}}" }],
+        "url": "{{base_url}}/auth/me/"
+      }
+    },
+    {
+      "name": "Create Integration API Key",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"ERP Sync\",\n  \"scopes\": [\"read\", \"write\"]\n}"
+        },
+        "url": "{{base_url}}/integrations/api-keys/"
+      }
+    },
+    {
+      "name": "List Integration API Keys",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/integrations/api-keys/"
+      }
+    },
+    {
+      "name": "Revoke Integration API Key",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{base_url}}/integrations/api-keys/{{integration_api_key_id}}/revoke/"
+      }
+    },
+    {
+      "name": "Get Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/dashboard/"
+      }
+    },
+    {
+      "name": "List Organizations",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/organizations/"
+      }
+    },
+    {
+      "name": "Add Checker To Organization",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": \"{{checker_user_id}}\",\n  \"role\": \"CHECKER\"\n}"
+        },
+        "url": "{{base_url}}/organizations/{{organization_id}}/members/"
+      }
+    },
+    {
+      "name": "List Organization Members",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/organizations/{{organization_id}}/members/"
+      }
+    },
+    {
+      "name": "Create Payee",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"label\": \"KPLC\",\n  \"payee_type\": \"PAYBILL\",\n  \"paybill_number\": \"888880\",\n  \"account_reference\": \"ACC123\",\n  \"expense_category\": \"utilities\"\n}"
+        },
+        "url": "{{base_url}}/payees/"
+      }
+    },
+    {
+      "name": "Create Schedule",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payee_id\": \"{{payee_id}}\",\n  \"amount_minor\": 300000,\n  \"day_of_month\": 5,\n  \"active\": true\n}"
+        },
+        "url": "{{base_url}}/schedules/"
+      }
+    },
+    {
+      "name": "Update Schedule",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"day_of_month\": 10,\n  \"active\": false\n}"
+        },
+        "url": "{{base_url}}/schedules/{{schedule_id}}/"
+      }
+    },
+    {
+      "name": "Top Up Individual Wallet",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount_minor\": 500000,\n  \"provider\": \"pesapal\"\n}"
+        },
+        "url": "{{base_url}}/wallets/topups/"
+      }
+    },
+    {
+      "name": "Move To Vault",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount_minor\": 50000\n}"
+        },
+        "url": "{{base_url}}/wallets/vault/"
+      }
+    },
+    {
+      "name": "Wallet Ledger",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/wallets/ledger/"
+      }
+    },
+    {
+      "name": "Pay All",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payment_mode\": \"WALLET\",\n  \"simulate_collection\": true\n}"
+        },
+        "url": "{{base_url}}/payments/pay-all/"
+      }
+    },
+    {
+      "name": "Pay All Via STK",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payment_mode\": \"STK\",\n  \"simulate_collection\": false\n}"
+        },
+        "url": "{{base_url}}/payments/pay-all/"
+      }
+    },
+    {
+      "name": "Top Up Corporate Wallet",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"organization_id\": \"{{organization_id}}\",\n  \"amount_minor\": 900000,\n  \"provider\": \"stripe\"\n}"
+        },
+        "url": "{{base_url}}/wallets/topups/"
+      }
+    },
+    {
+      "name": "Upload Corporate Batch",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"organization_id\": \"{{organization_id}}\",\n  \"scheduled_for\": \"2026-07-15\",\n  \"payment_mode\": \"WALLET\",\n  \"source_file_name\": \"vendor-batch.csv\",\n  \"description\": \"July vendor run\",\n  \"csv_content\": \"recipient_name,recipient_type,amount_minor,category,phone_number,external_reference\\nVendor A,MOBILE,100000,payroll,+254711111111,EMP001\\nVendor B,MOBILE,50000,payroll,+254722222222,EMP002\"\n}"
+        },
+        "url": "{{base_url}}/corporate/batches/upload/"
+      }
+    },
+    {
+      "name": "Submit Corporate Batch",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{base_url}}/corporate/batches/{{batch_id}}/submit/"
+      }
+    },
+    {
+      "name": "Approve Corporate Batch",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{checker_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{base_url}}/corporate/batches/{{batch_id}}/approve/"
+      }
+    },
+    {
+      "name": "Reject Corporate Batch",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{checker_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"reason\": \"Incorrect beneficiary amount\"\n}"
+        },
+        "url": "{{base_url}}/corporate/batches/{{batch_id}}/reject/"
+      }
+    },
+    {
+      "name": "List Batches",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/batches/?organization_id={{organization_id}}"
+      }
+    },
+    {
+      "name": "Get Batch Detail",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/batches/{{batch_id}}/"
+      }
+    },
+    {
+      "name": "Download Transactions CSV",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base_url}}/reports/transactions.csv?organization_id={{organization_id}}"
+      }
+    },
+    {
+      "name": "PesaWay Callback Receiver",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ExternalReference\": \"payout-example\",\n  \"TransactionReference\": \"PW-12345\",\n  \"Status\": \"SUCCESS\"\n}"
+        },
+        "url": "{{base_url}}/providers/pesaway/results/"
+      }
+    }
+  ]
+}

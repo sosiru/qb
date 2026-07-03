@@ -1,0 +1,240 @@
+[
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f01",
+    "fields": {
+      "code": "sms_t_minus_3",
+      "event_type": "T_MINUS_3",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_t_minus_3",
+      "subject_template": "",
+      "description": "SMS reminder three days before bills are due.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f02",
+    "fields": {
+      "code": "email_t_minus_3",
+      "event_type": "T_MINUS_3",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_t_minus_3",
+      "subject_template": "Bills due in 3 days",
+      "description": "Email reminder three days before bills are due.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f03",
+    "fields": {
+      "code": "sms_due_today",
+      "event_type": "DUE_TODAY",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_due_today",
+      "subject_template": "",
+      "description": "SMS reminder on the due date.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f04",
+    "fields": {
+      "code": "email_due_today",
+      "event_type": "DUE_TODAY",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_due_today",
+      "subject_template": "Bills due today",
+      "description": "Email reminder on the due date.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f05",
+    "fields": {
+      "code": "sms_payment_success",
+      "event_type": "PAYMENT_SUCCESS",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_payment_success",
+      "subject_template": "",
+      "description": "SMS sent after successful payment execution.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f06",
+    "fields": {
+      "code": "email_payment_success",
+      "event_type": "PAYMENT_SUCCESS",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_payment_success",
+      "subject_template": "Payment completed",
+      "description": "Email sent after successful payment execution.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f07",
+    "fields": {
+      "code": "sms_payment_failure",
+      "event_type": "PAYMENT_FAILURE",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_payment_failure",
+      "subject_template": "",
+      "description": "SMS sent when a payment fails or is partial.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f08",
+    "fields": {
+      "code": "email_payment_failure",
+      "event_type": "PAYMENT_FAILURE",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_payment_failure",
+      "subject_template": "Payment needs attention",
+      "description": "Email sent when a payment fails or is partial.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f09",
+    "fields": {
+      "code": "sms_approval_request",
+      "event_type": "APPROVAL_REQUEST",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_approval_request",
+      "subject_template": "",
+      "description": "SMS sent when a corporate batch requires approval.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f10",
+    "fields": {
+      "code": "email_approval_request",
+      "event_type": "APPROVAL_REQUEST",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_approval_request",
+      "subject_template": "Approval required",
+      "description": "Email sent when a corporate batch requires approval.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f11",
+    "fields": {
+      "code": "sms_batch_approved",
+      "event_type": "BATCH_APPROVED",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_batch_approved",
+      "subject_template": "",
+      "description": "SMS sent when a corporate batch is approved.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f12",
+    "fields": {
+      "code": "email_batch_approved",
+      "event_type": "BATCH_APPROVED",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_batch_approved",
+      "subject_template": "Batch approved",
+      "description": "Email sent when a corporate batch is approved.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f13",
+    "fields": {
+      "code": "sms_batch_rejected",
+      "event_type": "BATCH_REJECTED",
+      "channel": "SMS",
+      "system": "radicrunch",
+      "provider_template": "sms_batch_rejected",
+      "subject_template": "",
+      "description": "SMS sent when a corporate batch is rejected.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f14",
+    "fields": {
+      "code": "email_batch_rejected",
+      "event_type": "BATCH_REJECTED",
+      "channel": "EMAIL",
+      "system": "radicrunch",
+      "provider_template": "email_batch_rejected",
+      "subject_template": "Batch rejected",
+      "description": "Email sent when a corporate batch is rejected.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  }
+]
