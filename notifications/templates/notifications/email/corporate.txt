@@ -1,0 +1,14 @@
+{{ brand_name }} - {{ title }}
+
+Dear {{ user_name }},
+
+{{ intro }}
+
+{% for label, value in details %}{{ label }}: {{ value }}
+{% endfor %}
+{% if cta_url %}
+{{ cta_label }}: {{ cta_url }}
+{% endif %}
+
+If you did not expect this message, contact {{ support_email }}.
+Sent by {{ brand_name }} on {{ sent_at }}.

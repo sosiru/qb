@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+  </head>
+  <body style="margin:0; padding:0; background:#f4f5f7; color:#2f3437; font-family:Arial, Helvetica, sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7; padding:28px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 8px 24px rgba(18,24,26,0.08);">
+            <tr>
+              <td style="background:#0a4a38; padding:36px 28px; text-align:center;">
+                <div style="color:#ffffff; font-size:28px; line-height:1.2; font-weight:700; letter-spacing:-0.02em;">{{ brand_name }}</div>
+                <div style="margin-top:10px; color:#bfe7d5; font-size:12px; font-weight:700; letter-spacing:0.16em; text-transform:uppercase;">Payments workspace</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:38px 32px 32px;">
+                <div style="display:inline-block; padding:6px 10px; border-radius:999px; background:#eefaf3; color:#0d6b4f; font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase;">{{ badge }}</div>
+                <h1 style="margin:18px 0 18px; color:#0a4a38; font-size:24px; line-height:1.25; font-weight:700;">{{ title }}</h1>
+                <p style="margin:0 0 16px; color:#33383a; font-size:16px; line-height:1.7;">Dear <strong>{{ user_name }}</strong>,</p>
+                <p style="margin:0; color:#33383a; font-size:16px; line-height:1.7;">{{ intro }}</p>
+
+                {% if details %}
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px; border:2px solid #0f9468; border-radius:10px; overflow:hidden;">
+                    {% for label, value in details %}
+                      <tr>
+                        <td style="padding:15px 18px; border-bottom:1px solid #e5e0d3; color:#66706b; font-size:14px; font-weight:700;">{{ label }}</td>
+                        <td align="right" style="padding:15px 18px; border-bottom:1px solid #e5e0d3; color:#222829; font-size:14px; font-weight:700;">{{ value }}</td>
+                      </tr>
+                    {% endfor %}
+                  </table>
+                {% endif %}
+
+                {% if cta_url %}
+                  <div style="margin-top:30px; text-align:center;">
+                    <a href="{{ cta_url }}" style="display:inline-block; background:#0a4a38; color:#ffffff; text-decoration:none; padding:13px 22px; border-radius:8px; font-weight:700; font-size:14px;">{{ cta_label }}</a>
+                  </div>
+                {% endif %}
+
+                <p style="margin:30px 0 0; color:#66706b; font-size:13px; line-height:1.6;">If you did not expect this message, contact support at <a href="mailto:{{ support_email }}" style="color:#0d6b4f; font-weight:700;">{{ support_email }}</a>.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="background:#f7f8f8; padding:18px 32px; color:#7c8580; font-size:12px; line-height:1.6;">
+                Sent by {{ brand_name }} on {{ sent_at }}. This is an automated operational email for your account.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

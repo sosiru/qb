@@ -60,7 +60,7 @@ def request_collection_for_batch(batch_id):
         amount=amount_minor_to_provider_amount(batch.total_amount_minor + batch.fee_amount_minor),
         phone_number=batch.user.phone_number,
         channel=settings.PESAWAY_C2B_CHANNEL,
-        reason=batch.description or "Route payment collection",
+        reason=batch.description or "Quick Bundl payment collection",
         results_url=settings.PESAWAY_RESULTS_URL,
     )
     batch.metadata["collection_reference"] = provider_reference
@@ -75,7 +75,7 @@ def dispatch_instruction(instruction_id):
     client = build_pesaway_client()
     provider_reference = build_provider_reference("payout", instruction.id)
     amount = amount_minor_to_provider_amount(instruction.amount_minor)
-    reason = instruction.batch.description or instruction.category or "Route payout"
+    reason = instruction.batch.description or instruction.category or "Quick Bundl payout"
 
     if instruction.recipient_type == "MOBILE":
         response = client.send_b2c_payment(

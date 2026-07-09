@@ -1,0 +1,25 @@
+{% extends "portal/base.html" %}
+{% block title %}Vault{% endblock %}
+{% block page_heading %}{{ page_title }}{% endblock %}
+{% block page_subheading %}{{ page_description }}{% endblock %}
+{% block content %}
+  <section class="stat-grid" style="margin-bottom: 18px;">
+    <div class="mini-stat"><span class="muted">Wallet</span><strong>{{ wallet_display }}</strong></div>
+    <div class="mini-stat"><span class="muted">Vault reserve</span><strong>{{ vault_display }}</strong></div>
+    <div class="mini-stat"><span class="muted">Funding gap</span><strong>{{ missing_display }}</strong></div>
+    <div class="mini-stat"><span class="muted">Policy</span><strong>2% fee active</strong></div>
+  </section>
+  <section class="surface">
+    <h2>Control posture</h2>
+    <div class="panel-list">
+      <div class="panel-item">
+        <strong>Protected reserves</strong>
+        <div class="muted">Use the vault to separate committed capital from working balance and reduce payment-day volatility.</div>
+      </div>
+      <div class="panel-item">
+        <strong>Approval readiness</strong>
+        <div class="muted">Corporate workspaces can keep settlement capital visible here before maker-checker approval windows open.</div>
+      </div>
+    </div>
+  </section>
+{% endblock %}

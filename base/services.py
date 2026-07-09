@@ -1,7 +1,11 @@
+import calendar
 import csv
 import io
+import logging
+import random
+import secrets
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -14,16 +18,212 @@ from django.utils import timezone
 
 from api.models import IntegrationApiKey
 from audit.models import AuditLog
-from eusers.models import AccessToken, User
-from notifications.services import queue_notifications_for_user
+from eusers.models import AccessToken, LoginOtp, User
+from eusers.utils import normalize_phone_number
+from notifications.services import queue_email_notification, queue_notifications_for_user
+from ledger.models import LedgerEntry, WalletAccount
+from ledger.services import (
+    clear_uncleared_top_up,
+    get_or_create_organization_wallet_account,
+    get_or_create_user_wallet_account,
+    post_uncleared_top_up,
+    post_top_up as post_wallet_account_top_up,
+    post_wallet_adjustment,
+    post_withdrawal as post_wallet_account_withdrawal,
+    release_wallet_reserve,
+    reserve_wallet_funds,
+)
 
-from .models import Organization, OrganizationMembership, OutboxEvent, Payee, PaymentBatch, PaymentInstruction, PaymentSchedule, Wallet, WalletLedgerEntry
+from .models import (
+    BankDirectory,
+    LedgerMovement,
+    LedgerTransaction,
+    Organization,
+    OrganizationInvite,
+    OrganizationMembership,
+    ExpenseCategory,
+    OutboxEvent,
+    Payee,
+    PayeePreset,
+    PaymentBatch,
+    PaymentInstruction,
+    PaymentSchedule,
+    ReconciliationException,
+    TransactionEvent,
+    Wallet,
+)
+from .utils import TransactionRefGenerator
 
-SERVICE_FEE_BPS = 150
+SERVICE_FEE_BPS = 200
+logger = logging.getLogger(__name__)
+DEFAULT_TEST_OTP_PHONE = "254710956633"
+DEFAULT_TEST_OTP_CODE = "123456"
+LOGIN_OTP_TTL_MINUTES = 10
+LOGIN_OTP_RETRY_AFTER_SECONDS = 60
+TRANSACTION_REF_GENERATOR = TransactionRefGenerator(prefix="QB")
+
+PAYMENT_BATCH_TRANSITIONS = {
+    PaymentBatch.Status.DRAFT: {PaymentBatch.Status.PENDING_APPROVAL},
+    PaymentBatch.Status.PENDING_APPROVAL: {PaymentBatch.Status.APPROVED, PaymentBatch.Status.REJECTED, PaymentBatch.Status.FAILED},
+    PaymentBatch.Status.APPROVED: {PaymentBatch.Status.PROCESSING, PaymentBatch.Status.SUCCEEDED, PaymentBatch.Status.FAILED},
+    PaymentBatch.Status.PROCESSING: {PaymentBatch.Status.SUCCEEDED, PaymentBatch.Status.PARTIAL, PaymentBatch.Status.FAILED},
+    PaymentBatch.Status.PARTIAL: set(),
+    PaymentBatch.Status.SUCCEEDED: set(),
+    PaymentBatch.Status.FAILED: set(),
+    PaymentBatch.Status.REJECTED: set(),
+}
+PAYMENT_INSTRUCTION_TRANSITIONS = {
+    PaymentInstruction.Status.PENDING: {PaymentInstruction.Status.SUCCEEDED, PaymentInstruction.Status.FAILED},
+    PaymentInstruction.Status.SUCCEEDED: set(),
+    PaymentInstruction.Status.FAILED: set(),
+}
 
 
 class DomainError(Exception):
     pass
+
+
+class InsufficientFundsError(DomainError):
+    def __init__(self, wallet, amount_minor, available_balance_minor):
+        super().__init__(f"Insufficient funds for wallet {wallet.id}.")
+        self.wallet = wallet
+        self.amount_minor = amount_minor
+        self.available_balance_minor = available_balance_minor
+
+
+def generate_transaction_reference():
+    for _ in range(10):
+        reference = TRANSACTION_REF_GENERATOR.generate()
+        if not LedgerEntry.objects.filter(reference=reference).exists():
+            return reference
+    raise ValidationError("Could not generate a unique transaction reference.")
+
+
+def record_transaction_event(aggregate_type, aggregate_id, event_type, *, actor=None, from_status="", to_status="", payload=None, provider_reference=""):
+    return TransactionEvent.objects.create(
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
+        event_type=event_type,
+        from_status=from_status or "",
+        to_status=to_status or "",
+        actor=actor,
+        provider_reference=provider_reference or "",
+        payload=payload or {},
+    )
+
+
+def transition_payment_batch(batch, to_status, *, actor=None, event_type=None, payload=None, update_fields=None):
+    from_status = batch.status
+    if from_status == to_status:
+        return batch
+    if to_status not in PAYMENT_BATCH_TRANSITIONS.get(from_status, set()):
+        AuditLog.objects.create(
+            actor=actor,
+            action="payment_batch.invalid_transition",
+            target_type="payment_batch",
+            target_id=batch.id,
+            metadata={"from_status": from_status, "to_status": to_status, "payload": payload or {}},
+        )
+        raise ValidationError(f"Invalid payment batch transition {from_status} -> {to_status}.")
+    batch.status = to_status
+    fields = ["status", "updated_at"]
+    if update_fields:
+        fields.extend(field for field in update_fields if field not in fields)
+    batch.save(update_fields=fields)
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        event_type or f"payment_batch.{to_status.lower()}",
+        actor=actor,
+        from_status=from_status,
+        to_status=to_status,
+        payload=payload,
+    )
+    return batch
+
+
+def transition_payment_instruction(instruction, to_status, *, actor=None, event_type=None, payload=None, provider_reference=""):
+    from_status = instruction.status
+    if from_status == to_status:
+        return instruction
+    if to_status not in PAYMENT_INSTRUCTION_TRANSITIONS.get(from_status, set()):
+        AuditLog.objects.create(
+            actor=actor,
+            action="payment_instruction.invalid_transition",
+            target_type="payment_instruction",
+            target_id=instruction.id,
+            metadata={"from_status": from_status, "to_status": to_status, "payload": payload or {}},
+        )
+        raise ValidationError(f"Invalid payment instruction transition {from_status} -> {to_status}.")
+    instruction.status = to_status
+    instruction.save(update_fields=["status", "provider_reference", "provider_response", "failure_reason", "updated_at"])
+    record_transaction_event(
+        "payment_instruction",
+        instruction.id,
+        event_type or f"payment_instruction.{to_status.lower()}",
+        actor=actor,
+        from_status=from_status,
+        to_status=to_status,
+        payload=payload,
+        provider_reference=provider_reference,
+    )
+    return instruction
+
+
+def ledger_description(entry_type, metadata=None):
+    metadata = metadata or {}
+    if metadata.get("description"):
+        return metadata["description"]
+    descriptions = {
+        "TOP_UP": "Top up of funds",
+        "TRANSFER_TO_VAULT": "Funds moved to vault",
+        "TRANSFER_FROM_VAULT": "Funds received from vault transfer",
+        "DISBURSEMENT": "Withdrawal of funds",
+        "WITHDRAWAL": "Withdrawal of funds",
+        "ADJUSTMENT": "Wallet adjustment",
+    }
+    return descriptions.get(entry_type, "Wallet transaction")
+
+
+def _wallet_account_code(wallet):
+    if wallet.organization_id:
+        owner = f"ORG:{wallet.organization_id}"
+    else:
+        owner = f"USER:{wallet.user_id}"
+    return f"WALLET:{owner}:{wallet.wallet_type}"
+
+
+def _wallet_movement_ref(wallet):
+    return wallet if isinstance(wallet, Wallet) else None
+
+
+def _wallet_idempotency_key(prefix, reference):
+    return f"{prefix}:{reference}"
+
+
+def record_ledger_transaction(reference, transaction_type, movements, *, actor=None, source="", description="", metadata=None):
+    transaction_record = LedgerTransaction.objects.create(
+        reference=reference,
+        transaction_type=transaction_type,
+        actor=actor,
+        source=source,
+        description=description,
+        metadata=metadata or {},
+    )
+    for movement in movements:
+        LedgerMovement.objects.create(
+            transaction=transaction_record,
+            wallet=movement.get("wallet"),
+            account_code=movement["account_code"],
+            direction=movement["direction"],
+            amount_minor=abs(int(movement["amount_minor"])),
+            currency=movement.get("currency") or "KES",
+            balance_before_minor=int(movement.get("balance_before_minor") or 0),
+            balance_after_minor=int(movement.get("balance_after_minor") or 0),
+            description=movement.get("description", description),
+            metadata=movement.get("metadata", {}),
+        )
+    return transaction_record
 
 
 class PermissionDeniedError(DomainError):
@@ -34,12 +234,25 @@ class ValidationError(DomainError):
     pass
 
 
+class OtpRequired(DomainError):
+    def __init__(self, message, phone_number=None, dev_otp=None, expires_in_seconds=None, retry_after_seconds=None):
+        super().__init__(message)
+        self.phone_number = phone_number
+        self.dev_otp = dev_otp
+        self.expires_in_seconds = expires_in_seconds
+        self.retry_after_seconds = retry_after_seconds
+
+
+def can_manage_all_organizations(user):
+    return user.account_type in {User.AccountType.SUPERADMIN, User.AccountType.SERVICE_PROVIDER}
+
+
 def can_access_individual_features(user):
     return user.account_type in {User.AccountType.INDIVIDUAL, User.AccountType.SUPERADMIN}
 
 
 def can_access_corporate_features(user):
-    return user.account_type in {User.AccountType.CORPORATE, User.AccountType.SUPERADMIN}
+    return user.account_type in {User.AccountType.CORPORATE, User.AccountType.SUPERADMIN, User.AccountType.SERVICE_PROVIDER}
 
 
 def _parse_date(value):
@@ -49,6 +262,92 @@ def _parse_date(value):
         return date.fromisoformat(str(value))
     except ValueError as exc:
         raise ValidationError("Dates must use ISO format YYYY-MM-DD.") from exc
+
+
+def _clamp_day_for_month(year, month, day):
+    return min(day, calendar.monthrange(year, month)[1])
+
+
+def _compute_initial_due_date(day_of_month, base_date=None):
+    base_date = base_date or timezone.localdate()
+    year = base_date.year
+    month = base_date.month
+    due_day = _clamp_day_for_month(year, month, day_of_month)
+    due_date = base_date.replace(day=due_day)
+    if due_date < base_date:
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+        due_day = _clamp_day_for_month(year, month, day_of_month)
+        due_date = due_date.replace(year=year, month=month, day=due_day)
+    return due_date
+
+
+def _add_months(source_date, months, day_of_month):
+    month_index = (source_date.month - 1) + months
+    year = source_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = _clamp_day_for_month(year, month, day_of_month)
+    return source_date.replace(year=year, month=month, day=day)
+
+
+def _start_of_month(target_date):
+    return target_date.replace(day=1)
+
+
+def _end_of_month(target_date):
+    return target_date.replace(day=calendar.monthrange(target_date.year, target_date.month)[1])
+
+
+def _format_schedule_cadence(interval_months):
+    if interval_months == 1:
+        return "Every month"
+    return f"Every {interval_months} months"
+
+
+def _instruction_queryset_for_user(user, organization_id=None):
+    queryset = PaymentInstruction.objects.select_related("batch", "payee").order_by("-created_at")
+    if organization_id:
+        organization = get_organization_for_user(user, organization_id)
+        return queryset.filter(batch__organization=organization)
+    if can_manage_all_organizations(user):
+        return queryset
+    if user.account_type == User.AccountType.CORPORATE:
+        memberships = OrganizationMembership.objects.filter(user=user, is_active=True).values_list("organization_id", flat=True)
+        return queryset.filter(batch__organization_id__in=memberships)
+    return queryset.filter(batch__user=user)
+
+
+def _serialize_activity_instruction(instruction):
+    destination = instruction.destination or {}
+    sub_parts = []
+    if instruction.recipient_type == Payee.PayeeType.PAYBILL and destination.get("paybill_number"):
+        sub_parts.append(f"Paybill {destination['paybill_number']}")
+    elif instruction.recipient_type == Payee.PayeeType.TILL and destination.get("till_number"):
+        sub_parts.append(f"Till {destination['till_number']}")
+    elif instruction.recipient_type == Payee.PayeeType.MOBILE and destination.get("phone_number"):
+        sub_parts.append(destination["phone_number"])
+    elif instruction.recipient_type == Payee.PayeeType.BANK and destination.get("bank_name"):
+        sub_parts.append(destination["bank_name"])
+    if instruction.external_reference:
+        sub_parts.append(instruction.external_reference)
+    return {
+        "instruction_id": str(instruction.id),
+        "batch_id": str(instruction.batch_id),
+        "recipient_name": instruction.recipient_name,
+        "recipient_type": instruction.recipient_type,
+        "category": instruction.category,
+        "base_amount_minor": instruction.amount_minor,
+        "fee_amount_minor": instruction.fee_amount_minor,
+        "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
+        "status": instruction.status,
+        "reference": instruction.provider_reference or instruction.external_reference or str(instruction.id),
+        "description": instruction.recipient_name,
+        "subtext": " · ".join(part for part in sub_parts if part),
+        "created_at": instruction.created_at.isoformat(),
+    }
 
 
 def provider_dispatch_enabled():
@@ -67,34 +366,163 @@ def build_provider_reference(prefix, entity_id):
     return f"{prefix}-{str(entity_id).split('-')[0]}-{uuid.uuid4().hex[:8]}"
 
 
+def ensure_wallet_balance(wallet):
+    return wallet
+
+
+def _apply_wallet_balance_delta(wallet, *, current_delta=0, uncleared_delta=0, reserved_delta=0, available_delta=0):
+    reference = generate_transaction_reference()
+    return post_wallet_adjustment(
+        wallet,
+        amount_minor=available_delta or current_delta or reserved_delta or uncleared_delta,
+        reference=reference,
+        idempotency_key=_wallet_idempotency_key("balance-delta", reference),
+        metadata={
+            "current_delta": current_delta,
+            "uncleared_delta": uncleared_delta,
+            "reserved_delta": reserved_delta,
+            "available_delta": available_delta,
+        },
+    )
+
+
 def ensure_user_wallets(user):
-    primary, _ = Wallet.objects.get_or_create(
-        user=user,
-        wallet_type=Wallet.WalletType.PRIMARY,
-        defaults={"owner_type": Wallet.OwnerType.USER},
+    primary = get_or_create_user_wallet_account(
+        user,
+        wallet_type=WalletAccount.WalletType.PRIMARY,
     )
     vault = None
     if can_access_individual_features(user):
-        vault, _ = Wallet.objects.get_or_create(
-            user=user,
-            wallet_type=Wallet.WalletType.VAULT,
-            defaults={"owner_type": Wallet.OwnerType.USER},
+        vault = get_or_create_user_wallet_account(
+            user,
+            wallet_type=WalletAccount.WalletType.VAULT,
         )
     return primary, vault
 
 
 def ensure_organization_wallet(organization):
-    wallet, _ = Wallet.objects.get_or_create(
-        organization=organization,
-        wallet_type=Wallet.WalletType.PRIMARY,
-        defaults={"owner_type": Wallet.OwnerType.ORGANIZATION},
+    return get_or_create_organization_wallet_account(organization)
+
+
+@transaction.atomic
+def place_wallet_hold(wallet, amount_minor, *, reason, reference, expires_at=None, metadata=None):
+    if amount_minor <= 0:
+        raise ValidationError("amount_minor must be greater than 0.")
+    if wallet.available_balance_minor < amount_minor:
+        raise InsufficientFundsError(wallet, amount_minor, wallet.available_balance_minor)
+    return reserve_wallet_funds(
+        wallet,
+        amount_minor=amount_minor,
+        reference=reference,
+        idempotency_key=_wallet_idempotency_key("reserve", reference),
+        description=reason,
+        metadata={**(metadata or {}), "reason": reason, "expires_at": expires_at.isoformat() if expires_at else None},
     )
-    return wallet
+
+
+@transaction.atomic
+def release_wallet_hold(hold_id):
+    hold = LedgerEntry.objects.select_related("account").get(id=hold_id)
+    return release_wallet_reserve(
+        hold.account,
+        amount_minor=hold.amount_minor,
+        reference=f"{hold.reference}-RELEASE",
+        idempotency_key=_wallet_idempotency_key("reserve-release", hold.reference),
+        description="Release wallet reserve",
+        metadata={"reserved_entry_id": str(hold.id)},
+    )
+
+
+@transaction.atomic
+def post_uncleared_wallet_entry(wallet, amount_minor, *, entry_type, reference, metadata=None):
+    if not wallet.pk:
+        wallet = WalletAccount.objects.get(pk=wallet.pk)
+
+    return post_uncleared_top_up(
+        wallet,
+        amount_minor=amount_minor,
+        reference=reference,
+        idempotency_key=_wallet_idempotency_key("uncleared", reference),
+        description=ledger_description(entry_type, metadata),
+        metadata={**(metadata or {}), "entry_type": entry_type},
+    )
+
+
+@transaction.atomic
+def mark_wallet_entry_cleared(entry_id):
+    entry = LedgerEntry.objects.select_related("account").get(id=entry_id)
+    return clear_uncleared_top_up(entry)
 
 
 def issue_token(user):
+    logger.info("auth.token.issue.start user_id=%s phone=%s", user.id, user.phone_number)
     _, raw_token = AccessToken.issue(user)
+    logger.info("auth.token.issue.success user_id=%s phone=%s", user.id, user.phone_number)
     return raw_token
+
+
+def _generate_login_otp(phone_number):
+    if phone_number == DEFAULT_TEST_OTP_PHONE:
+        return DEFAULT_TEST_OTP_CODE
+    return f"{random.SystemRandom().randint(0, 99999):05d}"
+
+
+def _is_default_test_otp(phone_number, code):
+    normalized_code = str(code or "").strip()
+    return phone_number == DEFAULT_TEST_OTP_PHONE and normalized_code.isdigit() and len(normalized_code) == 6
+
+
+def _create_login_otp(user):
+    code = _generate_login_otp(user.phone_number)
+    LoginOtp.objects.filter(
+        user=user,
+        purpose=LoginOtp.Purpose.LOGIN,
+        consumed_at__isnull=True,
+    ).update(consumed_at=timezone.now())
+    LoginOtp.objects.create(
+        user=user,
+        purpose=LoginOtp.Purpose.LOGIN,
+        code_hash=LoginOtp.hash_code(code),
+        expires_at=timezone.now() + timedelta(minutes=LOGIN_OTP_TTL_MINUTES),
+    )
+    logger.info("auth.otp.created user_id=%s phone=%s purpose=LOGIN", user.id, user.phone_number)
+    if settings.DEBUG:
+        logger.info("auth.otp.dev_code user_id=%s phone=%s otp=%s", user.id, user.phone_number, code)
+    return code
+
+
+def _verify_login_otp(user, code):
+    normalized_code = str(code or "").strip()
+    if _is_default_test_otp(user.phone_number, normalized_code):
+        logger.info("auth.otp.verify.default_test_override user_id=%s phone=%s", user.id, user.phone_number)
+        return
+    otp = (
+        LoginOtp.objects.filter(
+            user=user,
+            purpose=LoginOtp.Purpose.LOGIN,
+            consumed_at__isnull=True,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if not otp or not otp.is_active():
+        logger.warning("auth.otp.verify.expired_or_missing user_id=%s phone=%s", user.id, user.phone_number)
+        raise ValidationError("OTP expired or missing. Request a new OTP.")
+
+    otp.attempts += 1
+    if otp.code_hash != LoginOtp.hash_code(normalized_code):
+        otp.save(update_fields=["attempts", "updated_at"])
+        logger.warning(
+            "auth.otp.verify.failed user_id=%s phone=%s attempts=%s",
+            user.id,
+            user.phone_number,
+            otp.attempts,
+        )
+        raise ValidationError("Invalid OTP.")
+
+    otp.consumed_at = timezone.now()
+    otp.save(update_fields=["attempts", "consumed_at", "updated_at"])
+    logger.info("auth.otp.verify.success user_id=%s phone=%s", user.id, user.phone_number)
 
 
 def issue_integration_api_key(user, payload):
@@ -128,14 +556,18 @@ def issue_integration_api_key(user, payload):
         action="integration_api_key.created",
         target_type="integration_api_key",
         target_id=api_key.id,
-        metadata={"organization_id": str(organization.id) if organization else None, "scopes": scopes},
+        metadata={
+            "name": api_key.name,
+            "organization_id": str(organization.id) if organization else None,
+            "scopes": scopes,
+        },
     )
     return api_key, raw_key
 
 
 def list_integration_api_keys(user, organization_id=None):
     queryset = IntegrationApiKey.objects.select_related("user", "organization", "created_by").order_by("-created_at")
-    if user.account_type == User.AccountType.SUPERADMIN and not organization_id:
+    if can_manage_all_organizations(user) and not organization_id:
         return queryset
     if organization_id:
         organization = get_organization_for_user(user, organization_id, allowed_roles=[OrganizationMembership.Role.ADMIN])
@@ -147,7 +579,7 @@ def revoke_integration_api_key(user, api_key_id):
     api_key = get_object_or_404(IntegrationApiKey.objects.select_related("organization", "user"), id=api_key_id)
     if api_key.organization_id:
         get_organization_for_user(user, api_key.organization_id, allowed_roles=[OrganizationMembership.Role.ADMIN])
-    elif api_key.user_id != user.id and user.account_type != User.AccountType.SUPERADMIN:
+    elif api_key.user_id != user.id and not can_manage_all_organizations(user):
         raise PermissionDeniedError("You do not have permission to revoke this API key.")
     api_key.is_active = False
     api_key.revoked_at = timezone.now()
@@ -157,13 +589,15 @@ def revoke_integration_api_key(user, api_key_id):
         action="integration_api_key.revoked",
         target_type="integration_api_key",
         target_id=api_key.id,
+        metadata={"name": api_key.name, "organization_id": str(api_key.organization_id) if api_key.organization_id else None},
     )
     return api_key
 
 
 @transaction.atomic
 def register_user(payload):
-    phone_number = (payload.get("phone_number") or "").strip()
+    logger.info("auth.register.start account_type=%s", payload.get("account_type"))
+    phone_number = normalize_phone_number(payload.get("phone_number"))
     password = payload.get("password") or ""
     full_name = (payload.get("full_name") or "").strip()
     account_type = payload.get("account_type")
@@ -171,7 +605,7 @@ def register_user(payload):
     if not phone_number or not password or not full_name or not account_type:
         raise ValidationError("phone_number, password, full_name, and account_type are required.")
     if account_type not in User.AccountType.values:
-        raise ValidationError("account_type must be INDIVIDUAL, CORPORATE, or SUPERADMIN.")
+        raise ValidationError("account_type must be INDIVIDUAL, CORPORATE, SERVICE_PROVIDER, or SUPERADMIN.")
 
     user = User.objects.create_user(
         phone_number=phone_number,
@@ -181,32 +615,87 @@ def register_user(payload):
         account_type=account_type,
         default_payment_mode=payload.get("default_payment_mode", User.PaymentMode.WALLET),
     )
+    logger.info("auth.register.user_created user_id=%s phone=%s account_type=%s", user.id, user.phone_number, user.account_type)
     ensure_user_wallets(user)
+    logger.info("auth.register.wallets_ready user_id=%s phone=%s", user.id, user.phone_number)
 
     if can_access_corporate_features(user) and payload.get("organization_name"):
         create_organization(
             user,
             {
                 "name": payload["organization_name"],
+                "registration_number": payload.get("registration_number", ""),
                 "kyc_status": payload.get("kyc_status", Organization.KycStatus.PENDING),
                 "role": payload.get("organization_role", OrganizationMembership.Role.ADMIN),
             },
         )
 
     token = issue_token(user)
+    queue_notifications_for_user(
+        user,
+        "SELF_ONBOARDING",
+        {
+            "user_name": user.full_name,
+            "phone_number": user.phone_number,
+            "account_type": user.account_type,
+            "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
+        },
+        scheduled_for=timezone.now(),
+    )
+    logger.info("auth.register.success user_id=%s phone=%s", user.id, user.phone_number)
     return user, token
 
 
 def login_user(payload):
-    phone_number = payload.get("phone_number")
+    phone_number = normalize_phone_number(payload.get("phone_number"))
     password = payload.get("password")
+    otp = payload.get("otp")
+    logger.info("auth.login.start phone=%s otp_present=%s", phone_number, bool(otp))
     if not phone_number or not password:
         raise ValidationError("phone_number and password are required.")
     user = authenticate(phone_number=phone_number, password=password)
     if not user:
+        logger.warning("auth.login.invalid_credentials phone=%s", phone_number)
         raise ValidationError("Invalid credentials.")
+    logger.info("auth.login.password_verified user_id=%s phone=%s", user.id, user.phone_number)
+
+    if not otp:
+        dev_otp = _create_login_otp(user)
+        queue_notifications_for_user(
+            user,
+            "LOGIN_OTP",
+            {
+                "user_name": user.full_name,
+                "phone_number": user.phone_number,
+                "otp": dev_otp,
+                "expires_in": f"{LOGIN_OTP_TTL_MINUTES} minutes",
+                "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
+            },
+            scheduled_for=timezone.now(),
+        )
+        raise OtpRequired(
+            "OTP required. Enter the code sent to your phone.",
+            phone_number=user.phone_number,
+            dev_otp=dev_otp if settings.DEBUG or user.phone_number == DEFAULT_TEST_OTP_PHONE else None,
+            expires_in_seconds=LOGIN_OTP_TTL_MINUTES * 60,
+            retry_after_seconds=LOGIN_OTP_RETRY_AFTER_SECONDS,
+        )
+
+    _verify_login_otp(user, otp)
     token = issue_token(user)
     ensure_user_wallets(user)
+    queue_notifications_for_user(
+        user,
+        "LOGIN_SUCCESS",
+        {
+            "user_name": user.full_name,
+            "phone_number": user.phone_number,
+            "login_time": timezone.localtime(timezone.now()).strftime("%d %b %Y, %I:%M %p"),
+            "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
+        },
+        scheduled_for=timezone.now(),
+    )
+    logger.info("auth.login.success user_id=%s phone=%s", user.id, user.phone_number)
     return user, token
 
 
@@ -224,6 +713,13 @@ def update_user_profile(user, payload):
         user.email = (payload.get("email") or "").strip()
         update_fields.append("email")
 
+    if "phone_number" in payload:
+        phone_number = normalize_phone_number(payload.get("phone_number"))
+        if not phone_number:
+            raise ValidationError("phone_number cannot be blank.")
+        user.phone_number = phone_number
+        update_fields.append("phone_number")
+
     if "default_payment_mode" in payload:
         payment_mode = payload.get("default_payment_mode")
         if payment_mode not in User.PaymentMode.values:
@@ -236,16 +732,28 @@ def update_user_profile(user, payload):
         "email_notifications_enabled",
         "push_notifications_enabled",
         "mfa_enabled",
+        "payouts_require_owner_approval",
     ]:
         if field_name in payload:
             setattr(user, field_name, bool(payload.get(field_name)))
             update_fields.append(field_name)
 
+    if "mpesa_withdrawal_phone" in payload:
+        phone_number = normalize_phone_number(payload.get("mpesa_withdrawal_phone"))
+        user.mpesa_withdrawal_phone = phone_number or ""
+        update_fields.append("mpesa_withdrawal_phone")
+
     if not update_fields:
         return user
 
     user.save(update_fields=update_fields + ["updated_at"])
-    AuditLog.objects.create(actor=user, action="user.profile_updated", target_type="user", target_id=user.id)
+    AuditLog.objects.create(
+        actor=user,
+        action="user.profile_updated",
+        target_type="user",
+        target_id=user.id,
+        metadata={"fields": update_fields},
+    )
     return user
 
 
@@ -272,7 +780,11 @@ def list_organizations(user, filters=None):
     if user.account_type == User.AccountType.CORPORATE:
         memberships = OrganizationMembership.objects.filter(user=user, is_active=True).values_list("organization_id", flat=True)
         queryset = queryset.filter(id__in=memberships)
-    elif user.account_type not in {User.AccountType.CORPORATE, User.AccountType.SUPERADMIN}:
+    elif user.account_type not in {
+        User.AccountType.CORPORATE,
+        User.AccountType.SUPERADMIN,
+        User.AccountType.SERVICE_PROVIDER,
+    }:
         return Organization.objects.none()
 
     if filters.get("q"):
@@ -304,11 +816,18 @@ def create_organization(user, payload):
     organization = Organization.objects.create(
         name=name,
         slug=slug,
+        registration_number=(payload.get("registration_number") or "").strip(),
         kyc_status=payload.get("kyc_status", Organization.KycStatus.PENDING),
     )
     OrganizationMembership.objects.create(user=user, organization=organization, role=role)
     ensure_organization_wallet(organization)
-    AuditLog.objects.create(actor=user, action="organization.created", target_type="organization", target_id=organization.id)
+    AuditLog.objects.create(
+        actor=user,
+        action="organization.created",
+        target_type="organization",
+        target_id=organization.id,
+        metadata={"organization_name": organization.name, "role": role},
+    )
     return organization
 
 
@@ -338,6 +857,10 @@ def update_organization(actor, organization_id, payload):
         organization.default_currency = currency
         update_fields.append("default_currency")
 
+    if "registration_number" in payload:
+        organization.registration_number = (payload.get("registration_number") or "").strip()
+        update_fields.append("registration_number")
+
     for field_name in ["push_notifications_enabled", "sms_notifications_enabled"]:
         if field_name in payload:
             setattr(organization, field_name, bool(payload.get(field_name)))
@@ -361,7 +884,7 @@ def update_organization(actor, organization_id, payload):
         action="organization.updated",
         target_type="organization",
         target_id=organization.id,
-        metadata={"fields": update_fields},
+        metadata={"fields": update_fields, "organization_name": organization.name},
     )
     return organization
 
@@ -383,9 +906,131 @@ def add_organization_member(actor, organization_id, payload):
         action="organization.member_upserted",
         target_type="membership",
         target_id=membership.id,
-        metadata={"created": created, "role": role},
+        metadata={
+            "created": created,
+            "role": role,
+            "member_name": member.full_name,
+            "user_id": str(member.id),
+            "organization_id": str(organization.id),
+            "organization_name": organization.name,
+        },
     )
     return membership
+
+
+def invite_organization_member(actor, organization_id, payload):
+    organization = get_organization_for_user(actor, organization_id, allowed_roles=[OrganizationMembership.Role.ADMIN])
+    email = (payload.get("email") or "").strip().lower()
+    role = payload.get("role")
+    if not email or "@" not in email or role not in OrganizationMembership.Role.values:
+        raise ValidationError("email and a valid role are required.")
+
+    token = secrets.token_urlsafe(32)
+    invite, created = OrganizationInvite.objects.update_or_create(
+        organization=organization,
+        email=email,
+        status=OrganizationInvite.Status.PENDING,
+        defaults={
+            "role": role,
+            "token": token,
+            "invited_by": actor,
+            "expires_at": timezone.now() + timedelta(days=7),
+        },
+    )
+    frontend_base_url = (payload.get("frontend_base_url") or getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200")).rstrip("/")
+    invite_link = f"{frontend_base_url}/accept-invite?token={invite.token}"
+    queue_email_notification(
+        [invite.email],
+        "ORGANIZATION_INVITE",
+        {
+            "email": invite.email,
+            "role": invite.role,
+            "organization_id": str(organization.id),
+            "organization_name": organization.name,
+            "invite_link": invite_link,
+            "invited_by": actor.full_name,
+        },
+        scheduled_for=timezone.now(),
+    )
+    AuditLog.objects.create(
+        actor=actor,
+        action="organization.member_invited",
+        target_type="organization_invite",
+        target_id=invite.id,
+        metadata={
+            "created": created,
+            "email": email,
+            "role": role,
+            "organization_id": str(organization.id),
+            "organization_name": organization.name,
+        },
+    )
+    return invite, invite_link
+
+
+@transaction.atomic
+def accept_organization_invite(payload):
+    token = (payload.get("token") or "").strip()
+    if not token:
+        raise ValidationError("token is required.")
+    invite = get_object_or_404(
+        OrganizationInvite.objects.select_related("organization"),
+        token=token,
+        status=OrganizationInvite.Status.PENDING,
+    )
+    if invite.expires_at < timezone.now():
+        invite.status = OrganizationInvite.Status.REVOKED
+        invite.save(update_fields=["status", "updated_at"])
+        raise ValidationError("Invite has expired.")
+
+    phone_number = normalize_phone_number(payload.get("phone_number"))
+    password = payload.get("password") or ""
+    full_name = (payload.get("full_name") or "").strip()
+    if not phone_number or not password or not full_name:
+        raise ValidationError("phone_number, password, and full_name are required.")
+
+    existing_user = User.objects.filter(phone_number=phone_number).first()
+    if existing_user:
+        user = existing_user
+        user.email = invite.email
+        user.full_name = full_name
+        if not user.account_type == User.AccountType.CORPORATE:
+            user.account_type = User.AccountType.CORPORATE
+        user.set_password(password)
+        user.save(update_fields=["email", "full_name", "account_type", "password", "updated_at"])
+        token_value = issue_token(user)
+    else:
+        user, token_value = register_user(
+            {
+                "phone_number": phone_number,
+                "password": password,
+                "full_name": full_name,
+                "email": invite.email,
+                "account_type": User.AccountType.CORPORATE,
+            }
+        )
+
+    membership, _ = OrganizationMembership.objects.update_or_create(
+        organization=invite.organization,
+        user=user,
+        defaults={"role": invite.role, "is_active": True},
+    )
+    invite.status = OrganizationInvite.Status.ACCEPTED
+    invite.accepted_at = timezone.now()
+    invite.save(update_fields=["status", "accepted_at", "updated_at"])
+    AuditLog.objects.create(
+        actor=user,
+        action="organization.invite_accepted",
+        target_type="organization_invite",
+        target_id=invite.id,
+        metadata={
+            "organization_id": str(invite.organization_id),
+            "organization_name": invite.organization.name,
+            "membership_id": str(membership.id),
+            "role": membership.role,
+        },
+    )
+    return user, token_value, membership
 
 
 def list_organization_members(actor, organization_id, filters=None):
@@ -431,7 +1076,13 @@ def update_organization_member(actor, organization_id, membership_id, payload):
         action="organization.member_updated",
         target_type="membership",
         target_id=membership.id,
-        metadata={"fields": update_fields},
+        metadata={
+            "fields": update_fields,
+            "member_name": membership.user.full_name,
+            "user_id": str(membership.user_id),
+            "organization_id": str(organization.id),
+            "organization_name": organization.name,
+        },
     )
     return membership
 
@@ -443,12 +1094,13 @@ def deactivate_organization_member(actor, organization_id, membership_id):
         action="organization.member_removed",
         target_type="membership",
         target_id=membership.id,
+        metadata={"member_name": membership.user.full_name, "user_id": str(membership.user_id)},
     )
     return membership
 
 
 def get_organization_for_user(user, organization_id, allowed_roles=None):
-    if user.account_type == User.AccountType.SUPERADMIN:
+    if can_manage_all_organizations(user):
         organization = Organization.objects.filter(id=organization_id).first()
         if not organization:
             raise PermissionDeniedError("Organization not found.")
@@ -463,6 +1115,41 @@ def get_organization_for_user(user, organization_id, allowed_roles=None):
     if allowed_roles and membership.role not in allowed_roles:
         raise PermissionDeniedError("You do not have permission for this organization action.")
     return membership.organization
+
+
+def _resolve_payee_preset(payload):
+    preset_id = payload.get("preset_id")
+    if not preset_id:
+        return dict(payload), None
+
+    preset = PayeePreset.objects.filter(id=preset_id, active=True).first()
+    if not preset:
+        raise ValidationError("Invalid preset_id.")
+
+    resolved = dict(payload)
+    if payload.get("payee_type") and payload["payee_type"] != preset.payee_type:
+        raise ValidationError("payee_type must match the selected preset.")
+
+    resolved["payee_type"] = preset.payee_type
+    if not (resolved.get("label") or "").strip():
+        resolved["label"] = preset.label
+    if not (resolved.get("expense_category") or "").strip():
+        resolved["expense_category"] = preset.expense_category
+
+    if preset.payee_type == Payee.PayeeType.PAYBILL:
+        provided_number = (payload.get("paybill_number") or "").strip()
+        if provided_number and provided_number != preset.paybill_number:
+            raise ValidationError("paybill_number must match the selected preset.")
+        resolved["paybill_number"] = preset.paybill_number
+        resolved["till_number"] = ""
+    elif preset.payee_type == Payee.PayeeType.TILL:
+        provided_number = (payload.get("till_number") or "").strip()
+        if provided_number and provided_number != preset.till_number:
+            raise ValidationError("till_number must match the selected preset.")
+        resolved["till_number"] = preset.till_number
+        resolved["paybill_number"] = ""
+
+    return resolved, preset
 
 
 def _validate_payee(payload):
@@ -484,13 +1171,26 @@ def _validate_payee(payload):
         raise ValidationError("bank_name, bank_code, and account_number are required for bank payees.")
 
 
+def ensure_expense_category(name):
+    category_name = (name or "general").strip() or "general"
+    category, _ = ExpenseCategory.objects.get_or_create(
+        name=category_name,
+        defaults={"active": True},
+    )
+    if not category.active:
+        category.active = True
+        category.save(update_fields=["active", "updated_at"])
+    return category
+
+
 def create_payee(user, payload):
-    _validate_payee(payload)
+    resolved_payload, preset = _resolve_payee_preset(payload)
+    _validate_payee(resolved_payload)
     organization = None
-    if payload.get("organization_id"):
+    if resolved_payload.get("organization_id"):
         organization = get_organization_for_user(
             user,
-            payload["organization_id"],
+            resolved_payload["organization_id"],
             allowed_roles=[
                 OrganizationMembership.Role.ADMIN,
                 OrganizationMembership.Role.MAKER,
@@ -498,22 +1198,36 @@ def create_payee(user, payload):
             ],
         )
 
+    phone_number = normalize_phone_number(resolved_payload.get("phone_number"))
+    expense_category = (resolved_payload.get("expense_category") or "general").strip()
+    ensure_expense_category(expense_category)
     payee = Payee.objects.create(
         user=None if organization else user,
         organization=organization,
-        payee_type=payload["payee_type"],
-        label=payload["label"].strip(),
-        account_reference=(payload.get("account_reference") or "").strip(),
-        phone_number=(payload.get("phone_number") or "").strip(),
-        paybill_number=(payload.get("paybill_number") or "").strip(),
-        till_number=(payload.get("till_number") or "").strip(),
-        bank_name=(payload.get("bank_name") or "").strip(),
-        bank_code=(payload.get("bank_code") or "").strip(),
-        account_number=(payload.get("account_number") or "").strip(),
-        expense_category=(payload.get("expense_category") or "general").strip(),
-        active=payload.get("active", True),
+        preset=preset,
+        payee_type=resolved_payload["payee_type"],
+        label=resolved_payload["label"].strip(),
+        account_reference=(resolved_payload.get("account_reference") or "").strip(),
+        phone_number=phone_number,
+        paybill_number=(resolved_payload.get("paybill_number") or "").strip(),
+        till_number=(resolved_payload.get("till_number") or "").strip(),
+        bank_name=(resolved_payload.get("bank_name") or "").strip(),
+        bank_code=(resolved_payload.get("bank_code") or "").strip(),
+        account_number=(resolved_payload.get("account_number") or "").strip(),
+        expense_category=expense_category,
+        active=resolved_payload.get("active", True),
     )
-    AuditLog.objects.create(actor=user, action="payee.created", target_type="payee", target_id=payee.id)
+    AuditLog.objects.create(
+        actor=user,
+        action="payee.created",
+        target_type="payee",
+        target_id=payee.id,
+        metadata={
+            "payee_label": payee.label,
+            "payee_type": payee.payee_type,
+            "organization_id": str(payee.organization_id) if payee.organization_id else None,
+        },
+    )
     return payee
 
 
@@ -541,7 +1255,7 @@ def update_payee(user, payee_id, payload):
         "label": payload.get("label", payee.label),
         "paybill_number": payload.get("paybill_number", payee.paybill_number),
         "till_number": payload.get("till_number", payee.till_number),
-        "phone_number": payload.get("phone_number", payee.phone_number),
+        "phone_number": normalize_phone_number(payload.get("phone_number", payee.phone_number)),
         "bank_name": payload.get("bank_name", payee.bank_name),
         "bank_code": payload.get("bank_code", payee.bank_code),
         "account_number": payload.get("account_number", payee.account_number),
@@ -566,6 +1280,10 @@ def update_payee(user, payee_id, payload):
             value = payload.get(field_name)
             if isinstance(getattr(payee, field_name), str):
                 value = (value or "").strip()
+            if field_name == "phone_number":
+                value = normalize_phone_number(value)
+            if field_name == "expense_category":
+                ensure_expense_category(value)
             if field_name == "active":
                 value = bool(value)
             setattr(payee, field_name, value)
@@ -580,7 +1298,7 @@ def update_payee(user, payee_id, payload):
         action="payee.updated",
         target_type="payee",
         target_id=payee.id,
-        metadata={"fields": update_fields},
+        metadata={"fields": update_fields, "payee_label": payee.label, "payee_type": payee.payee_type},
     )
     return payee
 
@@ -588,8 +1306,16 @@ def update_payee(user, payee_id, payload):
 def delete_payee(user, payee_id):
     payee = get_payee_for_user(user, payee_id)
     payee_identifier = payee.id
+    payee_label = payee.label
+    payee_type = payee.payee_type
     payee.delete()
-    AuditLog.objects.create(actor=user, action="payee.deleted", target_type="payee", target_id=payee_identifier)
+    AuditLog.objects.create(
+        actor=user,
+        action="payee.deleted",
+        target_type="payee",
+        target_id=payee_identifier,
+        metadata={"payee_label": payee_label, "payee_type": payee_type},
+    )
     return payee_identifier
 
 
@@ -614,13 +1340,33 @@ def create_schedule(user, payload):
             ],
         )
 
+    interval_months = int(payload.get("interval_months") or 1)
+    if interval_months < 1:
+        raise ValidationError("interval_months must be at least 1.")
+    next_due_date = _parse_date(payload.get("next_due_date")) if payload.get("next_due_date") else _compute_initial_due_date(int(day_of_month))
+
     schedule = PaymentSchedule.objects.create(
         payee=payee,
         amount_minor=int(amount_minor),
         day_of_month=int(day_of_month),
+        interval_months=interval_months,
+        next_due_date=next_due_date,
+        requires_approval=bool(payload.get("requires_approval", False)),
         active=payload.get("active", True),
     )
-    AuditLog.objects.create(actor=user, action="schedule.created", target_type="schedule", target_id=schedule.id)
+    AuditLog.objects.create(
+        actor=user,
+        action="schedule.created",
+        target_type="schedule",
+        target_id=schedule.id,
+        metadata={
+            "payee_label": payee.label,
+            "amount_minor": schedule.amount_minor,
+            "day_of_month": schedule.day_of_month,
+            "interval_months": schedule.interval_months,
+            "next_due_date": schedule.next_due_date.isoformat(),
+        },
+    )
     return schedule
 
 
@@ -645,6 +1391,24 @@ def update_schedule(user, schedule_id, payload):
     schedule = get_schedule_for_user(user, schedule_id)
     update_fields = []
 
+    if "payee_id" in payload and payload.get("payee_id"):
+        payee = get_object_or_404(Payee, id=payload.get("payee_id"))
+        if payee.user_id and payee.user_id != user.id:
+            raise PermissionDeniedError("You do not own this payee.")
+        if payee.organization_id:
+            get_organization_for_user(
+                user,
+                payee.organization_id,
+                allowed_roles=[
+                    OrganizationMembership.Role.ADMIN,
+                    OrganizationMembership.Role.MAKER,
+                ],
+            )
+        if schedule.payee.organization_id != payee.organization_id:
+            raise ValidationError("Schedule recipient must belong to the same workspace.")
+        schedule.payee = payee
+        update_fields.append("payee")
+
     if "amount_minor" in payload:
         amount_minor = int(payload.get("amount_minor") or 0)
         if amount_minor <= 0:
@@ -659,6 +1423,21 @@ def update_schedule(user, schedule_id, payload):
         schedule.day_of_month = day_of_month
         update_fields.append("day_of_month")
 
+    if "interval_months" in payload:
+        interval_months = int(payload.get("interval_months") or 0)
+        if interval_months < 1:
+            raise ValidationError("interval_months must be at least 1.")
+        schedule.interval_months = interval_months
+        update_fields.append("interval_months")
+
+    if "next_due_date" in payload:
+        schedule.next_due_date = _parse_date(payload.get("next_due_date"))
+        update_fields.append("next_due_date")
+
+    if "requires_approval" in payload:
+        schedule.requires_approval = bool(payload.get("requires_approval"))
+        update_fields.append("requires_approval")
+
     if "active" in payload:
         schedule.active = bool(payload.get("active"))
         update_fields.append("active")
@@ -672,7 +1451,7 @@ def update_schedule(user, schedule_id, payload):
         action="schedule.updated",
         target_type="schedule",
         target_id=schedule.id,
-        metadata={"fields": update_fields},
+        metadata={"fields": update_fields, "payee_label": schedule.payee.label, "amount_minor": schedule.amount_minor},
     )
     return schedule
 
@@ -680,8 +1459,15 @@ def update_schedule(user, schedule_id, payload):
 def delete_schedule(user, schedule_id):
     schedule = get_schedule_for_user(user, schedule_id)
     schedule_identifier = schedule.id
+    payee_label = schedule.payee.label
     schedule.delete()
-    AuditLog.objects.create(actor=user, action="schedule.deleted", target_type="schedule", target_id=schedule_identifier)
+    AuditLog.objects.create(
+        actor=user,
+        action="schedule.deleted",
+        target_type="schedule",
+        target_id=schedule_identifier,
+        metadata={"payee_label": payee_label},
+    )
     return schedule_identifier
 
 
@@ -710,6 +1496,58 @@ def list_payees(user, organization_id=None, filters=None):
     return queryset.order_by("label", "created_at")
 
 
+def list_payee_presets(filters=None):
+    filters = filters or {}
+    queryset = PayeePreset.objects.all()
+
+    if filters.get("payee_type") in Payee.PayeeType.values:
+        queryset = queryset.filter(payee_type=filters["payee_type"])
+
+    active = filters.get("active")
+    if active is None:
+        queryset = queryset.filter(active=True)
+    else:
+        queryset = queryset.filter(active=bool(active))
+
+    if filters.get("q"):
+        term = filters["q"].strip()
+        queryset = queryset.filter(
+            Q(label__icontains=term)
+            | Q(paybill_number__icontains=term)
+            | Q(till_number__icontains=term)
+            | Q(expense_category__icontains=term)
+        )
+    return queryset.order_by("label", "created_at")
+
+
+def list_expense_categories(filters=None):
+    filters = filters or {}
+    queryset = ExpenseCategory.objects.all()
+    active = filters.get("active")
+    if active is None:
+        queryset = queryset.filter(active=True)
+    else:
+        queryset = queryset.filter(active=bool(active))
+    if filters.get("q"):
+        term = filters["q"].strip()
+        queryset = queryset.filter(Q(name__icontains=term) | Q(description__icontains=term))
+    return queryset.order_by("name", "created_at")
+
+
+def list_banks(filters=None):
+    filters = filters or {}
+    queryset = BankDirectory.objects.all()
+    active = filters.get("active")
+    if active is None:
+        queryset = queryset.filter(active=True)
+    else:
+        queryset = queryset.filter(active=bool(active))
+    if filters.get("q"):
+        term = filters["q"].strip()
+        queryset = queryset.filter(Q(name__icontains=term) | Q(code__icontains=term))
+    return queryset.order_by("name", "code")
+
+
 def list_schedules(user, organization_id=None, filters=None):
     filters = filters or {}
     if organization_id:
@@ -726,7 +1564,7 @@ def list_schedules(user, organization_id=None, filters=None):
     if filters.get("q"):
         term = filters["q"].strip()
         queryset = queryset.filter(Q(payee__label__icontains=term) | Q(payee__account_reference__icontains=term))
-    return queryset.order_by("day_of_month", "payee__label")
+    return queryset.order_by("next_due_date", "day_of_month", "payee__label")
 
 
 def top_up_wallet(user, payload):
@@ -734,12 +1572,12 @@ def top_up_wallet(user, payload):
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
 
-    requested_wallet_type = payload.get("wallet_type", Wallet.WalletType.PRIMARY)
-    if requested_wallet_type not in Wallet.WalletType.values:
+    requested_wallet_type = payload.get("wallet_type", WalletAccount.WalletType.PRIMARY)
+    if requested_wallet_type not in WalletAccount.WalletType.values:
         raise ValidationError("Invalid wallet_type.")
 
     if payload.get("organization_id"):
-        if requested_wallet_type != Wallet.WalletType.PRIMARY:
+        if requested_wallet_type != WalletAccount.WalletType.PRIMARY:
             raise ValidationError("Organization top-ups can only target the primary wallet.")
         organization = get_organization_for_user(
             user,
@@ -749,25 +1587,60 @@ def top_up_wallet(user, payload):
         wallet = ensure_organization_wallet(organization)
     else:
         primary_wallet, vault_wallet = ensure_user_wallets(user)
-        if requested_wallet_type == Wallet.WalletType.VAULT:
+        if requested_wallet_type == WalletAccount.WalletType.VAULT:
             if not vault_wallet:
                 raise ValidationError("Vault top-ups are only available for individual accounts.")
             wallet = vault_wallet
         else:
             wallet = primary_wallet
 
-    wallet.available_balance_minor += amount_minor
-    wallet.save(update_fields=["available_balance_minor", "updated_at"])
-    WalletLedgerEntry.objects.create(
-        wallet=wallet,
-        entry_type=WalletLedgerEntry.EntryType.TOP_UP,
+    balance_before = wallet.available_balance_minor
+    reference = generate_transaction_reference()
+    post_wallet_account_top_up(
+        wallet,
         amount_minor=amount_minor,
-        balance_after_minor=wallet.available_balance_minor,
-        reference=f"topup:{timezone.now().isoformat()}",
+        reference=reference,
+        idempotency_key=payload.get("idempotency_key") or _wallet_idempotency_key("top-up", reference),
+        description="Top up of funds",
         metadata={
+            "description": "Top up of funds",
             "provider": payload.get("provider", "simulated"),
             "wallet_type": wallet.wallet_type,
+            "base_amount_minor": amount_minor,
+            "fee_amount_minor": 0,
+            "gross_amount_minor": amount_minor,
+            "status": "SUCCEEDED",
         },
+    )
+    wallet.refresh_from_db()
+    record_ledger_transaction(
+        reference,
+        "WALLET_TOP_UP",
+        [
+            {
+                "wallet": _wallet_movement_ref(wallet),
+                "account_code": _wallet_account_code(wallet),
+                "direction": LedgerMovement.Direction.DEBIT,
+                "amount_minor": amount_minor,
+                "currency": wallet.currency,
+                "balance_before_minor": balance_before,
+                "balance_after_minor": wallet.available_balance_minor,
+                "description": "Top up credited to wallet",
+            },
+            {
+                "account_code": "CLEARING:TOP_UP",
+                "direction": LedgerMovement.Direction.CREDIT,
+                "amount_minor": amount_minor,
+                "currency": wallet.currency,
+                "balance_before_minor": 0,
+                "balance_after_minor": 0,
+                "description": "Top up funding source",
+            },
+        ],
+        actor=user,
+        source=payload.get("provider", "simulated"),
+        description="Top up of funds",
+        metadata={"wallet_id": str(wallet.id), "wallet_type": wallet.wallet_type},
     )
     OutboxEvent.objects.create(
         topic="wallet.topup.completed",
@@ -782,49 +1655,206 @@ def list_wallet_ledger(user, organization_id=None, filters=None):
     filters = filters or {}
     if organization_id:
         organization = get_organization_for_user(user, organization_id)
-        wallets = Wallet.objects.filter(organization=organization)
+        wallets = WalletAccount.objects.filter(organization=organization)
     else:
-        wallets = Wallet.objects.filter(user=user)
+        wallets = WalletAccount.objects.filter(user=user)
 
-    if filters.get("wallet_type") in Wallet.WalletType.values:
+    if filters.get("wallet_type") in WalletAccount.WalletType.values:
         wallets = wallets.filter(wallet_type=filters["wallet_type"])
 
-    queryset = WalletLedgerEntry.objects.select_related("wallet").filter(wallet__in=wallets)
-    if filters.get("entry_type") in WalletLedgerEntry.EntryType.values:
-        queryset = queryset.filter(entry_type=filters["entry_type"])
+    queryset = LedgerEntry.objects.select_related("account").filter(account__in=wallets)
+    if filters.get("entry_type") in LedgerEntry.TransactionType.values:
+        queryset = queryset.filter(transaction_type=filters["entry_type"])
     return queryset.order_by("-created_at")
 
 
 @transaction.atomic
 def transfer_to_vault(user, payload):
     amount_minor = int(payload.get("amount_minor") or 0)
+    direction = (payload.get("direction") or "TO_VAULT").upper()
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
+    if direction not in {"TO_VAULT", "TO_PRIMARY"}:
+        raise ValidationError("direction must be TO_VAULT or TO_PRIMARY.")
     primary_wallet, vault_wallet = ensure_user_wallets(user)
     if not vault_wallet:
         raise ValidationError("Vaulting is only available for individual accounts.")
-    if primary_wallet.available_balance_minor < amount_minor:
-        raise ValidationError("Insufficient primary wallet balance.")
 
-    primary_wallet.available_balance_minor -= amount_minor
-    vault_wallet.available_balance_minor += amount_minor
-    primary_wallet.save(update_fields=["available_balance_minor", "updated_at"])
-    vault_wallet.save(update_fields=["available_balance_minor", "updated_at"])
-    WalletLedgerEntry.objects.create(
-        wallet=primary_wallet,
-        entry_type=WalletLedgerEntry.EntryType.TRANSFER_TO_VAULT,
+    primary_before = primary_wallet.available_balance_minor
+    vault_before = vault_wallet.available_balance_minor
+
+    if direction == "TO_VAULT":
+        if primary_wallet.available_balance_minor < amount_minor:
+            raise ValidationError("Insufficient primary wallet balance.")
+        debit_wallet = primary_wallet
+        credit_wallet = vault_wallet
+        debit_description = "Funds moved to vault"
+        credit_description = "Funds received in vault"
+    else:
+        if vault_wallet.available_balance_minor < amount_minor:
+            raise ValidationError("Insufficient vault balance.")
+        debit_wallet = vault_wallet
+        credit_wallet = primary_wallet
+        debit_description = "Funds moved from vault"
+        credit_description = "Funds returned to primary wallet"
+
+    reference = generate_transaction_reference()
+    post_wallet_adjustment(
+        debit_wallet,
         amount_minor=-amount_minor,
-        balance_after_minor=primary_wallet.available_balance_minor,
-        reference=f"vault-transfer:{vault_wallet.id}",
+        reference=f"{reference}-DR",
+        idempotency_key=_wallet_idempotency_key("vault-debit", reference),
+        description=debit_description,
+        metadata={
+            "description": debit_description,
+            "direction": direction,
+            "base_amount_minor": amount_minor,
+            "fee_amount_minor": 0,
+            "gross_amount_minor": amount_minor,
+            "status": "SUCCEEDED",
+            "entry_type": "TRANSFER_TO_VAULT",
+        },
     )
-    WalletLedgerEntry.objects.create(
-        wallet=vault_wallet,
-        entry_type=WalletLedgerEntry.EntryType.TRANSFER_FROM_VAULT,
+    post_wallet_adjustment(
+        credit_wallet,
         amount_minor=amount_minor,
-        balance_after_minor=vault_wallet.available_balance_minor,
-        reference=f"vault-transfer:{primary_wallet.id}",
+        reference=f"{reference}-CR",
+        idempotency_key=_wallet_idempotency_key("vault-credit", reference),
+        description=credit_description,
+        metadata={
+            "description": credit_description,
+            "direction": direction,
+            "base_amount_minor": amount_minor,
+            "fee_amount_minor": 0,
+            "gross_amount_minor": amount_minor,
+            "status": "SUCCEEDED",
+            "entry_type": "TRANSFER_FROM_VAULT",
+        },
+    )
+    primary_wallet.refresh_from_db()
+    vault_wallet.refresh_from_db()
+    debit_before = primary_before if debit_wallet.id == primary_wallet.id else vault_before
+    credit_before = primary_before if credit_wallet.id == primary_wallet.id else vault_before
+    record_ledger_transaction(
+        reference,
+        "WALLET_TRANSFER",
+        [
+            {
+                "wallet": _wallet_movement_ref(debit_wallet),
+                "account_code": _wallet_account_code(debit_wallet),
+                "direction": LedgerMovement.Direction.CREDIT,
+                "amount_minor": amount_minor,
+                "currency": debit_wallet.currency,
+                "balance_before_minor": debit_before,
+                "balance_after_minor": debit_wallet.available_balance_minor,
+                "description": debit_description,
+            },
+            {
+                "wallet": _wallet_movement_ref(credit_wallet),
+                "account_code": _wallet_account_code(credit_wallet),
+                "direction": LedgerMovement.Direction.DEBIT,
+                "amount_minor": amount_minor,
+                "currency": credit_wallet.currency,
+                "balance_before_minor": credit_before,
+                "balance_after_minor": credit_wallet.available_balance_minor,
+                "description": credit_description,
+            },
+        ],
+        actor=user,
+        source="wallet",
+        description="Wallet-to-wallet transfer",
+        metadata={"direction": direction},
     )
     return primary_wallet, vault_wallet
+
+
+@transaction.atomic
+def withdraw_to_mpesa(user, payload):
+    amount_minor = int(payload.get("amount_minor") or 0)
+    if amount_minor <= 0:
+        raise ValidationError("amount_minor must be greater than 0.")
+
+    phone_number = normalize_phone_number(payload.get("phone_number") or user.mpesa_withdrawal_phone or user.phone_number)
+    if not phone_number:
+        raise ValidationError("A valid M-Pesa withdrawal phone number is required.")
+
+    primary_wallet, _ = ensure_user_wallets(user)
+    if primary_wallet.available_balance_minor < amount_minor:
+        raise ValidationError("Insufficient wallet balance.")
+
+    balance_before = primary_wallet.available_balance_minor
+    reference = generate_transaction_reference()
+    entry = post_wallet_account_withdrawal(
+        primary_wallet,
+        amount_minor=amount_minor,
+        reference=reference,
+        idempotency_key=payload.get("idempotency_key") or _wallet_idempotency_key("withdrawal", reference),
+        description="Withdrawal of funds",
+        metadata={
+            "description": "Withdrawal of funds",
+            "destination_type": "MPESA",
+            "phone_number": phone_number,
+            "requires_owner_approval": user.payouts_require_owner_approval,
+            "status": "PENDING_APPROVAL" if user.payouts_require_owner_approval else "SUBMITTED",
+            "base_amount_minor": amount_minor,
+            "fee_amount_minor": 0,
+            "gross_amount_minor": amount_minor,
+        },
+    )
+    primary_wallet.refresh_from_db()
+    record_ledger_transaction(
+        reference,
+        "WALLET_WITHDRAWAL",
+        [
+            {
+                "wallet": _wallet_movement_ref(primary_wallet),
+                "account_code": _wallet_account_code(primary_wallet),
+                "direction": LedgerMovement.Direction.CREDIT,
+                "amount_minor": amount_minor,
+                "currency": primary_wallet.currency,
+                "balance_before_minor": balance_before,
+                "balance_after_minor": primary_wallet.available_balance_minor,
+                "description": "Withdrawal debited from wallet",
+            },
+            {
+                "account_code": "CLEARING:MPESA_WITHDRAWAL",
+                "direction": LedgerMovement.Direction.DEBIT,
+                "amount_minor": amount_minor,
+                "currency": primary_wallet.currency,
+                "balance_before_minor": 0,
+                "balance_after_minor": 0,
+                "description": "Withdrawal payable to M-Pesa",
+            },
+        ],
+        actor=user,
+        source="mpesa",
+        description="Withdrawal of funds",
+        metadata={"ledger_entry_id": str(entry.id), "phone_number": phone_number},
+    )
+    OutboxEvent.objects.create(
+        topic="wallet.withdrawal.requested",
+        aggregate_type="wallet",
+        aggregate_id=primary_wallet.id,
+        payload={
+            "amount_minor": amount_minor,
+            "phone_number": phone_number,
+            "requires_owner_approval": user.payouts_require_owner_approval,
+            "ledger_entry_id": str(entry.id),
+        },
+    )
+    AuditLog.objects.create(
+        actor=user,
+        action="wallet.withdrawal_requested",
+        target_type="wallet",
+        target_id=primary_wallet.id,
+        metadata={
+            "amount_minor": amount_minor,
+            "phone_number": phone_number,
+            "ledger_entry_id": str(entry.id),
+            "requires_owner_approval": user.payouts_require_owner_approval,
+        },
+    )
+    return primary_wallet, entry
 
 
 def _build_destination_from_payee(payee):
@@ -839,10 +1869,14 @@ def _build_destination_from_payee(payee):
     }
 
 
-def _calculate_fee(total_amount_minor, payment_mode):
-    if payment_mode == PaymentBatch.PaymentMode.WALLET:
-        return 0
-    return max(0, total_amount_minor * SERVICE_FEE_BPS // 10000)
+def _calculate_instruction_fee(amount_minor):
+    return max(0, int(amount_minor) * SERVICE_FEE_BPS // 10000)
+
+
+def _recalculate_batch_fee(batch):
+    batch.fee_amount_minor = batch.instructions.aggregate(total=Sum("fee_amount_minor"))["total"] or 0
+    batch.save(update_fields=["fee_amount_minor", "updated_at"])
+    return batch.fee_amount_minor
 
 
 def _queue_instruction_dispatches(batch):
@@ -856,9 +1890,24 @@ def _queue_instruction_dispatches(batch):
 
 
 def _mark_batch_success(batch, actor=None):
+    from_status = batch.status
     batch.status = PaymentBatch.Status.SUCCEEDED
     batch.processed_at = timezone.now()
     batch.save(update_fields=["status", "processed_at", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.succeeded",
+        actor=actor,
+        from_status=from_status,
+        to_status=batch.status,
+        payload={"total_amount_minor": batch.total_amount_minor, "fee_amount_minor": batch.fee_amount_minor},
+    )
+    schedule_ids = batch.metadata.get("schedule_ids") or []
+    if schedule_ids:
+        for schedule in PaymentSchedule.objects.filter(id__in=schedule_ids):
+            schedule.next_due_date = _add_months(schedule.next_due_date, schedule.interval_months, schedule.day_of_month)
+            schedule.save(update_fields=["next_due_date", "updated_at"])
     OutboxEvent.objects.create(
         topic="payment.batch.succeeded",
         aggregate_type="payment_batch",
@@ -875,9 +1924,19 @@ def _mark_batch_success(batch, actor=None):
 
 
 def _mark_batch_failure(batch, actor, reason, status=PaymentBatch.Status.FAILED):
+    from_status = batch.status
     batch.status = status
     batch.processed_at = timezone.now()
     batch.save(update_fields=["status", "processed_at", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.failed",
+        actor=actor,
+        from_status=from_status,
+        to_status=batch.status,
+        payload={"reason": reason},
+    )
     queue_notifications_for_user(
         actor,
         "PAYMENT_FAILURE",
@@ -891,9 +1950,18 @@ def record_batch_failure(batch, reason, status=PaymentBatch.Status.FAILED):
     if actor:
         _mark_batch_failure(batch, actor, reason, status=status)
     else:
+        from_status = batch.status
         batch.status = status
         batch.processed_at = timezone.now()
         batch.save(update_fields=["status", "processed_at", "updated_at"])
+        record_transaction_event(
+            "payment_batch",
+            batch.id,
+            "payment_batch.failed",
+            from_status=from_status,
+            to_status=batch.status,
+            payload={"reason": reason},
+        )
 
 
 def _batch_notification_user(batch):
@@ -914,18 +1982,24 @@ def pay_individual_due_items(user, payload):
     if schedule_ids:
         schedules = schedules.filter(id__in=schedule_ids)
     else:
-        schedules = schedules.filter(day_of_month=timezone.localdate().day)
+        schedules = schedules.filter(next_due_date__lte=timezone.localdate())
     schedules = list(schedules)
     if not schedules:
         raise ValidationError("No active schedules found for payment.")
 
     batch = PaymentBatch.objects.create(
         batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_MONTHLY,
-        status=PaymentBatch.Status.PROCESSING,
+        status=PaymentBatch.Status.PENDING_APPROVAL if user.payouts_require_owner_approval else PaymentBatch.Status.PROCESSING,
         payment_mode=payment_mode,
         user=user,
         scheduled_for=timezone.localdate(),
         description="Individual pay-all execution",
+        submitted_by=user,
+        submitted_at=timezone.now() if user.payouts_require_owner_approval else None,
+        metadata={
+            "schedule_ids": [str(schedule.id) for schedule in schedules],
+            "requires_owner_approval": user.payouts_require_owner_approval,
+        },
     )
     for schedule in schedules:
         PaymentInstruction.objects.create(
@@ -935,12 +2009,26 @@ def pay_individual_due_items(user, payload):
             recipient_type=schedule.payee.payee_type,
             destination=_build_destination_from_payee(schedule.payee),
             amount_minor=schedule.amount_minor,
+            fee_amount_minor=_calculate_instruction_fee(schedule.amount_minor),
             category=schedule.payee.expense_category,
             external_reference=schedule.payee.account_reference,
         )
     batch.recalculate_totals()
-    batch.fee_amount_minor = _calculate_fee(batch.total_amount_minor, payment_mode)
-    batch.save(update_fields=["fee_amount_minor", "updated_at"])
+    _recalculate_batch_fee(batch)
+    if user.payouts_require_owner_approval:
+        AuditLog.objects.create(
+            actor=user,
+            action="individual_batch.pending_owner_approval",
+            target_type="batch",
+            target_id=batch.id,
+            metadata={
+                "batch_description": batch.description,
+                "instruction_count": batch.instructions.count(),
+                "amount_minor": batch.total_amount_minor,
+                "fee_amount_minor": batch.fee_amount_minor,
+            },
+        )
+        return batch
     settle_batch(batch, actor=user, simulate_collection=payload.get("simulate_collection", True))
     return batch
 
@@ -952,7 +2040,8 @@ def run_due_wallet_autopayments(run_date=None):
         default_payment_mode=User.PaymentMode.WALLET,
         payees__schedules__active=True,
         payees__active=True,
-        payees__schedules__day_of_month=run_date.day,
+        payees__schedules__next_due_date__lte=run_date,
+        payees__schedules__requires_approval=False,
     ).filter(account_type__in=[User.AccountType.INDIVIDUAL, User.AccountType.SUPERADMIN]).distinct()
 
     for user in users:
@@ -960,7 +2049,7 @@ def run_due_wallet_autopayments(run_date=None):
             user=user,
             batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_MONTHLY,
             scheduled_for=run_date,
-            status__in=[PaymentBatch.Status.PROCESSING, PaymentBatch.Status.SUCCEEDED],
+            status__in=[PaymentBatch.Status.PENDING_APPROVAL, PaymentBatch.Status.PROCESSING, PaymentBatch.Status.SUCCEEDED],
         ).exists()
         if already_processed:
             continue
@@ -968,7 +2057,8 @@ def run_due_wallet_autopayments(run_date=None):
             payee__user=user,
             active=True,
             payee__active=True,
-            day_of_month=run_date.day,
+            next_due_date__lte=run_date,
+            requires_approval=False,
         ).values_list("id", flat=True)
         if schedules:
             pay_individual_due_items(
@@ -994,7 +2084,7 @@ def _create_instruction_from_row(batch, row):
         recipient_name=(row.get("recipient_name") or "").strip() or "Unnamed Recipient",
         recipient_type=recipient_type,
         destination={
-            "phone_number": (row.get("phone_number") or "").strip(),
+            "phone_number": normalize_phone_number(row.get("phone_number")),
             "paybill_number": (row.get("paybill_number") or "").strip(),
             "till_number": (row.get("till_number") or "").strip(),
             "bank_name": (row.get("bank_name") or "").strip(),
@@ -1003,6 +2093,7 @@ def _create_instruction_from_row(batch, row):
             "account_reference": (row.get("account_reference") or "").strip(),
         },
         amount_minor=amount_minor,
+        fee_amount_minor=_calculate_instruction_fee(amount_minor),
         category=(row.get("category") or "general").strip(),
         external_reference=(row.get("external_reference") or "").strip(),
     )
@@ -1045,9 +2136,22 @@ def upload_corporate_batch(user, payload):
         raise ValidationError("CSV did not contain any payment rows.")
 
     batch.recalculate_totals()
-    batch.fee_amount_minor = _calculate_fee(batch.total_amount_minor, batch.payment_mode)
-    batch.save(update_fields=["fee_amount_minor", "updated_at"])
-    AuditLog.objects.create(actor=user, action="batch.uploaded", target_type="batch", target_id=batch.id)
+    _recalculate_batch_fee(batch)
+    AuditLog.objects.create(
+        actor=user,
+        action="batch.uploaded",
+        target_type="batch",
+        target_id=batch.id,
+        metadata={
+            "batch_description": batch.description,
+            "source_file_name": batch.source_file_name,
+            "instruction_count": batch.instructions.count(),
+            "amount_minor": batch.total_amount_minor,
+            "fee_amount_minor": batch.fee_amount_minor,
+            "organization_id": str(organization.id),
+            "organization_name": organization.name,
+        },
+    )
     return batch
 
 
@@ -1065,6 +2169,7 @@ def submit_batch_for_approval(user, batch_id):
     )
     if batch.status != PaymentBatch.Status.DRAFT:
         raise ValidationError("Only draft batches can be submitted.")
+    from_status = batch.status
     batch.status = PaymentBatch.Status.PENDING_APPROVAL
     batch.submitted_by = user
     batch.submitted_at = timezone.now()
@@ -1078,6 +2183,15 @@ def submit_batch_for_approval(user, batch_id):
     )
     batch.metadata["approval_history"] = approval_history
     batch.save(update_fields=["status", "submitted_by", "submitted_at", "metadata", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.submitted",
+        actor=user,
+        from_status=from_status,
+        to_status=batch.status,
+        payload={"organization_id": str(batch.organization_id), "instruction_count": batch.instructions.count()},
+    )
 
     checker_members = OrganizationMembership.objects.filter(
         organization=batch.organization,
@@ -1091,25 +2205,41 @@ def submit_batch_for_approval(user, batch_id):
             {"batch_id": str(batch.id), "total_amount_minor": batch.total_amount_minor},
             scheduled_for=timezone.now(),
         )
-    AuditLog.objects.create(actor=user, action="batch.submitted", target_type="batch", target_id=batch.id)
+    AuditLog.objects.create(
+        actor=user,
+        action="batch.submitted",
+        target_type="batch",
+        target_id=batch.id,
+        metadata={
+            "batch_description": batch.description,
+            "instruction_count": batch.instructions.count(),
+            "amount_minor": batch.total_amount_minor,
+            "fee_amount_minor": batch.fee_amount_minor,
+            "organization_id": str(batch.organization_id),
+            "organization_name": batch.organization.name if batch.organization_id else None,
+        },
+    )
     return batch
 
 
 @transaction.atomic
 def approve_batch(user, batch_id):
     batch = get_object_or_404(
-        PaymentBatch.objects.select_related("organization"),
+        PaymentBatch.objects.select_related("organization", "user", "submitted_by"),
         id=batch_id,
-        batch_kind=PaymentBatch.BatchKind.CORPORATE_UPLOAD,
     )
-    get_organization_for_user(
-        user,
-        batch.organization_id,
-        allowed_roles=[OrganizationMembership.Role.ADMIN, OrganizationMembership.Role.CHECKER],
-    )
+    if batch.organization_id:
+        get_organization_for_user(
+            user,
+            batch.organization_id,
+            allowed_roles=[OrganizationMembership.Role.ADMIN, OrganizationMembership.Role.CHECKER],
+        )
+    elif batch.user_id != user.id and not can_manage_all_organizations(user):
+        raise PermissionDeniedError("You cannot approve this payout batch.")
     if batch.status != PaymentBatch.Status.PENDING_APPROVAL:
         raise ValidationError("Only pending approval batches can be approved.")
 
+    from_status = batch.status
     batch.status = PaymentBatch.Status.APPROVED
     batch.approved_by = user
     batch.approved_at = timezone.now()
@@ -1123,7 +2253,16 @@ def approve_batch(user, batch_id):
     )
     batch.metadata["approval_history"] = approval_history
     batch.save(update_fields=["status", "approved_by", "approved_at", "metadata", "updated_at"])
-    if batch.submitted_by_id:
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.approved",
+        actor=user,
+        from_status=from_status,
+        to_status=batch.status,
+        payload={"organization_id": str(batch.organization_id) if batch.organization_id else None},
+    )
+    if batch.submitted_by_id and batch.submitted_by_id != user.id:
         queue_notifications_for_user(
             batch.submitted_by,
             "BATCH_APPROVED",
@@ -1131,22 +2270,37 @@ def approve_batch(user, batch_id):
             scheduled_for=timezone.now(),
         )
     settle_batch(batch, actor=user, simulate_collection=True)
-    AuditLog.objects.create(actor=user, action="batch.approved", target_type="batch", target_id=batch.id)
+    AuditLog.objects.create(
+        actor=user,
+        action="batch.approved",
+        target_type="batch",
+        target_id=batch.id,
+        metadata={
+            "batch_description": batch.description,
+            "instruction_count": batch.instructions.count(),
+            "amount_minor": batch.total_amount_minor,
+            "fee_amount_minor": batch.fee_amount_minor,
+            "organization_id": str(batch.organization_id) if batch.organization_id else None,
+            "organization_name": batch.organization.name if batch.organization_id else None,
+        },
+    )
     return batch
 
 
 @transaction.atomic
 def reject_batch(user, batch_id, payload):
     batch = get_object_or_404(
-        PaymentBatch.objects.select_related("organization", "submitted_by"),
+        PaymentBatch.objects.select_related("organization", "submitted_by", "user"),
         id=batch_id,
-        batch_kind=PaymentBatch.BatchKind.CORPORATE_UPLOAD,
     )
-    get_organization_for_user(
-        user,
-        batch.organization_id,
-        allowed_roles=[OrganizationMembership.Role.ADMIN, OrganizationMembership.Role.CHECKER],
-    )
+    if batch.organization_id:
+        get_organization_for_user(
+            user,
+            batch.organization_id,
+            allowed_roles=[OrganizationMembership.Role.ADMIN, OrganizationMembership.Role.CHECKER],
+        )
+    elif batch.user_id != user.id and not can_manage_all_organizations(user):
+        raise PermissionDeniedError("You cannot reject this payout batch.")
     if batch.status != PaymentBatch.Status.PENDING_APPROVAL:
         raise ValidationError("Only pending approval batches can be rejected.")
 
@@ -1154,6 +2308,7 @@ def reject_batch(user, batch_id, payload):
     if not rejection_reason:
         raise ValidationError("reason is required.")
 
+    from_status = batch.status
     batch.status = PaymentBatch.Status.REJECTED
     approval_history = list(batch.metadata.get("approval_history") or [])
     approval_history.append(
@@ -1168,8 +2323,17 @@ def reject_batch(user, batch_id, payload):
     batch.metadata["rejection_reason"] = rejection_reason
     batch.processed_at = timezone.now()
     batch.save(update_fields=["status", "metadata", "processed_at", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.rejected",
+        actor=user,
+        from_status=from_status,
+        to_status=batch.status,
+        payload={"reason": rejection_reason},
+    )
 
-    if batch.submitted_by_id:
+    if batch.submitted_by_id and batch.submitted_by_id != user.id:
         queue_notifications_for_user(
             batch.submitted_by,
             "BATCH_REJECTED",
@@ -1185,7 +2349,13 @@ def reject_batch(user, batch_id, payload):
         action="batch.rejected",
         target_type="batch",
         target_id=batch.id,
-        metadata={"reason": rejection_reason},
+        metadata={
+            "reason": rejection_reason,
+            "batch_description": batch.description,
+            "instruction_count": batch.instructions.count(),
+            "organization_id": str(batch.organization_id) if batch.organization_id else None,
+            "organization_name": batch.organization.name if batch.organization_id else None,
+        },
     )
     return batch
 
@@ -1202,25 +2372,82 @@ def settle_batch(batch, actor, simulate_collection=True):
             _mark_batch_failure(batch, actor, "insufficient_wallet_balance")
             raise ValidationError("Insufficient wallet balance.")
 
-        wallet.available_balance_minor -= required_total
-        wallet.save(update_fields=["available_balance_minor", "updated_at"])
-        WalletLedgerEntry.objects.create(
-            wallet=wallet,
-            entry_type=WalletLedgerEntry.EntryType.DISBURSEMENT,
-            amount_minor=-required_total,
-            balance_after_minor=wallet.available_balance_minor,
-            reference=f"batch:{batch.id}",
-            metadata={"fee_amount_minor": batch.fee_amount_minor},
+        balance_before = wallet.available_balance_minor
+        reference = generate_transaction_reference()
+        post_wallet_account_withdrawal(
+            wallet,
+            amount_minor=required_total,
+            reference=reference,
+            idempotency_key=_wallet_idempotency_key("batch-disbursement", reference),
+            description="Batch disbursement",
+            metadata={
+                "description": "Batch disbursement",
+                "batch_id": str(batch.id),
+                "base_amount_minor": batch.total_amount_minor,
+                "fee_amount_minor": batch.fee_amount_minor,
+                "gross_amount_minor": required_total,
+                "status": "PROCESSING" if provider_dispatch_enabled() else "SUCCEEDED",
+            },
+        )
+        wallet.refresh_from_db()
+        record_ledger_transaction(
+            reference,
+            "BATCH_DISBURSEMENT",
+            [
+                {
+                    "wallet": _wallet_movement_ref(wallet),
+                    "account_code": _wallet_account_code(wallet),
+                    "direction": LedgerMovement.Direction.CREDIT,
+                    "amount_minor": required_total,
+                    "currency": wallet.currency,
+                    "balance_before_minor": balance_before,
+                    "balance_after_minor": wallet.available_balance_minor,
+                    "description": "Batch disbursement debited from wallet",
+                },
+                {
+                    "account_code": "CLEARING:BATCH_DISBURSEMENT",
+                    "direction": LedgerMovement.Direction.DEBIT,
+                    "amount_minor": required_total,
+                    "currency": wallet.currency,
+                    "balance_before_minor": 0,
+                    "balance_after_minor": 0,
+                    "description": "Batch payout clearing account",
+                },
+            ],
+            actor=actor,
+            source="wallet",
+            description="Batch disbursement",
+            metadata={"batch_id": str(batch.id), "fee_amount_minor": batch.fee_amount_minor},
         )
         if provider_dispatch_enabled():
+            from_status = batch.status
             batch.status = PaymentBatch.Status.PROCESSING
             batch.save(update_fields=["status", "updated_at"])
+            record_transaction_event(
+                "payment_batch",
+                batch.id,
+                "payment_batch.processing",
+                actor=actor,
+                from_status=from_status,
+                to_status=batch.status,
+                payload={"dispatch": "provider"},
+            )
             _queue_instruction_dispatches(batch)
             return batch
     else:
         if not simulate_collection:
+            from_status = batch.status
             batch.status = PaymentBatch.Status.PROCESSING
             batch.save(update_fields=["status", "updated_at"])
+            record_transaction_event(
+                "payment_batch",
+                batch.id,
+                "payment_batch.processing",
+                actor=actor,
+                from_status=from_status,
+                to_status=batch.status,
+                payload={"dispatch": "collection.stk.requested"},
+            )
             OutboxEvent.objects.create(
                 topic="collection.stk.requested",
                 aggregate_type="payment_batch",
@@ -1252,6 +2479,7 @@ def finalize_batch_from_instructions(batch):
     )
     if summary["pending"]:
         return batch.status
+    from_status = batch.status
     if summary["failed"] and summary["succeeded"]:
         batch.status = PaymentBatch.Status.PARTIAL
     elif summary["failed"]:
@@ -1260,6 +2488,15 @@ def finalize_batch_from_instructions(batch):
         batch.status = PaymentBatch.Status.SUCCEEDED
     batch.processed_at = timezone.now()
     batch.save(update_fields=["status", "processed_at", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        f"payment_batch.{batch.status.lower()}",
+        actor=_batch_notification_user(batch),
+        from_status=from_status,
+        to_status=batch.status,
+        payload=summary,
+    )
     OutboxEvent.objects.create(
         topic=f"payment.batch.{batch.status.lower()}",
         aggregate_type="payment_batch",
@@ -1287,6 +2524,7 @@ def finalize_batch_from_instructions(batch):
 
 
 def record_instruction_success(instruction, provider_response, provider_reference=""):
+    from_status = instruction.status
     instruction.status = PaymentInstruction.Status.SUCCEEDED
     instruction.failure_reason = ""
     instruction.provider_reference = provider_reference or instruction.provider_reference
@@ -1294,15 +2532,34 @@ def record_instruction_success(instruction, provider_response, provider_referenc
     instruction.save(
         update_fields=["status", "failure_reason", "provider_reference", "provider_response", "updated_at"]
     )
+    record_transaction_event(
+        "payment_instruction",
+        instruction.id,
+        "payment_instruction.succeeded",
+        from_status=from_status,
+        to_status=instruction.status,
+        provider_reference=instruction.provider_reference,
+        payload={"provider_response": provider_response or {}},
+    )
     finalize_batch_from_instructions(instruction.batch)
     return instruction
 
 
 def record_instruction_failure(instruction, reason, provider_response=None):
+    from_status = instruction.status
     instruction.status = PaymentInstruction.Status.FAILED
     instruction.failure_reason = reason[:255]
     instruction.provider_response = provider_response or {}
     instruction.save(update_fields=["status", "failure_reason", "provider_response", "updated_at"])
+    record_transaction_event(
+        "payment_instruction",
+        instruction.id,
+        "payment_instruction.failed",
+        from_status=from_status,
+        to_status=instruction.status,
+        provider_reference=instruction.provider_reference,
+        payload={"reason": reason, "provider_response": provider_response or {}},
+    )
     finalize_batch_from_instructions(instruction.batch)
     return instruction
 
@@ -1322,7 +2579,7 @@ def get_batch_for_user(user, batch_id):
                 OrganizationMembership.Role.CHECKER,
             ],
         )
-    elif batch.user_id != user.id and user.account_type != User.AccountType.SUPERADMIN:
+    elif batch.user_id != user.id and not can_manage_all_organizations(user):
         raise PermissionDeniedError("You do not have access to this batch.")
     return batch
 
@@ -1333,11 +2590,11 @@ def list_batches(user, organization_id=None, filters=None):
     if organization_id:
         organization = get_organization_for_user(user, organization_id)
         queryset = queryset.filter(organization=organization)
-    elif user.account_type == User.AccountType.SUPERADMIN:
+    elif can_manage_all_organizations(user):
         queryset = queryset
     elif user.account_type == User.AccountType.CORPORATE:
         memberships = OrganizationMembership.objects.filter(user=user, is_active=True).values_list("organization_id", flat=True)
-        queryset = queryset.filter(organization_id__in=memberships)
+        queryset = queryset.filter(Q(user=user) | Q(organization_id__in=memberships))
     else:
         queryset = queryset.filter(user=user)
 
@@ -1350,11 +2607,230 @@ def list_batches(user, organization_id=None, filters=None):
     return queryset
 
 
-def build_dashboard(user):
+def quick_pay(user, payload):
+    payee_id = payload.get("payee_id")
+    amount_minor = int(payload.get("amount_minor") or 0)
+    if not payee_id or amount_minor <= 0:
+        raise ValidationError("payee_id and amount_minor are required.")
+
+    payment_mode = payload.get("payment_mode", user.default_payment_mode)
+    if payment_mode not in PaymentBatch.PaymentMode.values:
+        raise ValidationError("Invalid payment_mode.")
+
+    payee = get_object_or_404(Payee, id=payee_id)
+    organization = None
+    if payload.get("organization_id"):
+        organization = get_organization_for_user(
+            user,
+            payload["organization_id"],
+            allowed_roles=[
+                OrganizationMembership.Role.ADMIN,
+                OrganizationMembership.Role.MAKER,
+                OrganizationMembership.Role.CHECKER,
+            ],
+        )
+        if payee.organization_id and payee.organization_id != organization.id:
+            raise ValidationError("payee_id does not belong to the selected organization.")
+        if payee.user_id:
+            raise ValidationError("Organization quick pay requires an organization payee.")
+    elif payee.organization_id:
+        get_organization_for_user(
+            user,
+            payee.organization_id,
+            allowed_roles=[
+                OrganizationMembership.Role.ADMIN,
+                OrganizationMembership.Role.MAKER,
+                OrganizationMembership.Role.CHECKER,
+            ],
+        )
+        organization = payee.organization
+    elif payee.user_id != user.id and not can_manage_all_organizations(user):
+        raise PermissionDeniedError("You do not own this payee.")
+
+    batch = PaymentBatch.objects.create(
+        batch_kind=PaymentBatch.BatchKind.CORPORATE_UPLOAD if organization else PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+        status=PaymentBatch.Status.DRAFT if organization else (
+            PaymentBatch.Status.PENDING_APPROVAL if user.payouts_require_owner_approval else PaymentBatch.Status.PROCESSING
+        ),
+        payment_mode=payment_mode,
+        user=None if organization else user,
+        organization=organization,
+        scheduled_for=_parse_date(payload.get("scheduled_for") or timezone.localdate()),
+        description=(payload.get("description") or f"Quick pay to {payee.label}").strip(),
+        submitted_by=user if organization or user.payouts_require_owner_approval else None,
+        submitted_at=timezone.now() if not organization and user.payouts_require_owner_approval else None,
+        metadata={"requires_owner_approval": user.payouts_require_owner_approval} if not organization else {},
+    )
+    PaymentInstruction.objects.create(
+        batch=batch,
+        payee=payee,
+        recipient_name=payee.label,
+        recipient_type=payee.payee_type,
+        destination=_build_destination_from_payee(payee),
+        amount_minor=amount_minor,
+        fee_amount_minor=_calculate_instruction_fee(amount_minor),
+        category=payee.expense_category,
+        external_reference=(payload.get("external_reference") or payee.account_reference or "").strip(),
+    )
+    batch.recalculate_totals()
+    _recalculate_batch_fee(batch)
+
+    if organization:
+        if payload.get("submit_for_approval", True):
+            batch = submit_batch_for_approval(user, batch.id)
+        return batch
+
+    if user.payouts_require_owner_approval:
+        AuditLog.objects.create(
+            actor=user,
+            action="quick_pay.pending_owner_approval",
+            target_type="batch",
+            target_id=batch.id,
+            metadata={
+                "batch_description": batch.description,
+                "payee_label": payee.label,
+                "instruction_count": batch.instructions.count(),
+                "amount_minor": batch.total_amount_minor,
+                "fee_amount_minor": batch.fee_amount_minor,
+            },
+        )
+        return batch
+
+    settle_batch(batch, actor=user, simulate_collection=payload.get("simulate_collection", True))
+    return batch
+
+
+def list_approval_batches(user, organization_id=None):
+    return (
+        list_batches(
+            user,
+            organization_id,
+            {"status": PaymentBatch.Status.PENDING_APPROVAL},
+        )
+        .select_related("submitted_by", "organization")
+        .prefetch_related("instructions")
+    )
+
+
+def build_approval_queue(user, organization_id=None):
+    queue = []
+    for batch in list_approval_batches(user, organization_id)[:50]:
+        sample_instructions = list(batch.instructions.all()[:5])
+        queue.append(
+            {
+                "batch_id": str(batch.id),
+                "name": batch.description or batch.source_file_name or "Approval item",
+                "organization_id": str(batch.organization_id) if batch.organization_id else None,
+                "organization_name": batch.organization.name if batch.organization_id else None,
+                "submitted_by": batch.submitted_by.full_name if batch.submitted_by_id else "",
+                "scheduled_for": batch.scheduled_for.isoformat(),
+                "base_amount_minor": batch.total_amount_minor,
+                "fee_amount_minor": batch.fee_amount_minor,
+                "gross_amount_minor": batch.total_amount_minor + batch.fee_amount_minor,
+                "instruction_count": batch.instructions.count(),
+                "status": batch.status,
+                "sample_instructions": [
+                    {
+                        "recipient_name": instruction.recipient_name,
+                        "recipient_type": instruction.recipient_type,
+                        "amount_minor": instruction.amount_minor,
+                    }
+                    for instruction in sample_instructions
+                ],
+            }
+        )
+    return queue
+
+
+def build_transaction_summary(user, organization_id=None, filters=None):
+    filters = filters or {}
+    instruction_queryset = _instruction_queryset_for_user(user, organization_id)
+    if filters.get("status") in PaymentInstruction.Status.values:
+        instruction_queryset = instruction_queryset.filter(status=filters["status"])
+    if filters.get("category"):
+        instruction_queryset = instruction_queryset.filter(category=filters["category"].strip())
+    if filters.get("recipient_type") in Payee.PayeeType.values:
+        instruction_queryset = instruction_queryset.filter(recipient_type=filters["recipient_type"])
+    if filters.get("q"):
+        term = filters["q"].strip()
+        instruction_queryset = instruction_queryset.filter(
+            Q(recipient_name__icontains=term)
+            | Q(external_reference__icontains=term)
+            | Q(provider_reference__icontains=term)
+        )
+
+    date_from = _parse_date(filters["date_from"]) if filters.get("date_from") else timezone.localdate() - timedelta(days=30)
+    date_to = _parse_date(filters["date_to"]) if filters.get("date_to") else timezone.localdate()
+    instruction_queryset = instruction_queryset.filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
+
+    if organization_id:
+        wallet_queryset = LedgerEntry.objects.select_related("account").filter(account__organization_id=organization_id)
+    else:
+        wallet_queryset = LedgerEntry.objects.select_related("account").filter(account__user=user)
+    wallet_queryset = wallet_queryset.filter(created_at__date__gte=date_from, created_at__date__lte=date_to).order_by("created_at")
+
+    summary = instruction_queryset.aggregate(
+        total_base=Sum("amount_minor"),
+        total_fees=Sum("fee_amount_minor"),
+    )
+    total_base = summary["total_base"] or 0
+    total_fees = summary["total_fees"] or 0
+    total_debits = total_base + total_fees
+    total_credits = sum(entry.amount_minor for entry in wallet_queryset if entry.transaction_type == LedgerEntry.TransactionType.TOP_UP)
+    opening_balance = 0
+    first_entry = wallet_queryset.first()
+    if first_entry:
+        opening_balance = first_entry.balance_before_minor
+
+    transactions = [_serialize_activity_instruction(instruction) for instruction in instruction_queryset[:200]]
+    return {
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
+        "opening_balance_minor": opening_balance,
+        "total_debits_minor": total_debits,
+        "total_credits_minor": total_credits,
+        "total_fees_minor": total_fees,
+        "transaction_count": len(transactions),
+        "transactions": transactions,
+    }
+
+
+def build_dashboard(user, organization_id=None):
+    dashboard = {"account_type": user.account_type}
     if can_access_individual_features(user):
         primary_wallet, vault_wallet = ensure_user_wallets(user)
         active_schedules = PaymentSchedule.objects.filter(payee__user=user, active=True, payee__active=True).select_related("payee")
         monthly_commitments = active_schedules.aggregate(total=Sum("amount_minor"))["total"] or 0
+        month_start = _start_of_month(timezone.localdate())
+        month_end = _end_of_month(timezone.localdate())
+        due_this_month = active_schedules.filter(next_due_date__gte=month_start, next_due_date__lte=month_end).order_by("next_due_date", "payee__label")
+        personal_instruction_queryset = PaymentInstruction.objects.select_related("batch", "payee").filter(batch__user=user).order_by("-created_at")
+        recent_transactions = [_serialize_activity_instruction(item) for item in personal_instruction_queryset[:5]]
+        category_source = personal_instruction_queryset.filter(created_at__date__gte=timezone.localdate() - timedelta(days=30))
+        category_totals = {}
+        for instruction in category_source:
+            category_totals.setdefault(instruction.category, 0)
+            category_totals[instruction.category] += instruction.amount_minor + instruction.fee_amount_minor
+
+        monthly_trend = []
+        for offset in range(5, -1, -1):
+            month_anchor = _start_of_month(_add_months(timezone.localdate(), -offset, 1))
+            month_key = (month_anchor.year, month_anchor.month)
+            month_income = 0
+            month_spend = 0
+            for entry in LedgerEntry.objects.filter(account__user=user, created_at__year=month_key[0], created_at__month=month_key[1]):
+                if entry.transaction_type == LedgerEntry.TransactionType.TOP_UP:
+                    month_income += entry.amount_minor
+            for instruction in personal_instruction_queryset.filter(created_at__year=month_key[0], created_at__month=month_key[1]):
+                month_spend += instruction.amount_minor + instruction.fee_amount_minor
+            monthly_trend.append(
+                {
+                    "label": month_anchor.strftime("%b"),
+                    "income_minor": month_income,
+                    "spend_minor": month_spend,
+                }
+            )
+
         individual_dashboard = {
             "wallet_balance_minor": primary_wallet.available_balance_minor,
             "vault_balance_minor": vault_wallet.available_balance_minor if vault_wallet else 0,
@@ -1365,27 +2841,57 @@ def build_dashboard(user):
                     "schedule_id": str(schedule.id),
                     "payee_label": schedule.payee.label,
                     "amount_minor": schedule.amount_minor,
-                    "day_of_month": schedule.day_of_month,
+                    "fee_amount_minor": _calculate_instruction_fee(schedule.amount_minor),
+                    "gross_amount_minor": schedule.amount_minor + _calculate_instruction_fee(schedule.amount_minor),
+                    "next_due_date": schedule.next_due_date.isoformat(),
+                    "interval_months": schedule.interval_months,
+                    "cadence_label": _format_schedule_cadence(schedule.interval_months),
                     "category": schedule.payee.expense_category,
                 }
-                for schedule in active_schedules.order_by("day_of_month")[:10]
+                for schedule in active_schedules.order_by("next_due_date", "payee__label")[:10]
             ],
+            "due_this_month": [
+                {
+                    "schedule_id": str(schedule.id),
+                    "payee_label": schedule.payee.label,
+                    "category": schedule.payee.expense_category,
+                    "next_due_date": schedule.next_due_date.isoformat(),
+                    "interval_months": schedule.interval_months,
+                    "cadence_label": _format_schedule_cadence(schedule.interval_months),
+                    "base_amount_minor": schedule.amount_minor,
+                    "fee_amount_minor": _calculate_instruction_fee(schedule.amount_minor),
+                    "gross_amount_minor": schedule.amount_minor + _calculate_instruction_fee(schedule.amount_minor),
+                }
+                for schedule in due_this_month
+            ],
+            "due_this_month_total_minor": sum(
+                schedule.amount_minor + _calculate_instruction_fee(schedule.amount_minor) for schedule in due_this_month
+            ),
+            "recent_transactions": recent_transactions,
+            "spending_by_category": [
+                {"category": category, "amount_minor": amount}
+                for category, amount in sorted(category_totals.items(), key=lambda item: item[1], reverse=True)
+            ],
+            "monthly_trend": monthly_trend,
         }
         if user.account_type == User.AccountType.INDIVIDUAL:
-            return {
-                "account_type": user.account_type,
-                **individual_dashboard,
-            }
+            return {**dashboard, **individual_dashboard}
+        dashboard["individual"] = individual_dashboard
 
     organizations = []
+    selected_organization = None
     if can_access_corporate_features(user):
         membership_map = {}
-        if user.account_type == User.AccountType.SUPERADMIN:
-            organizations_qs = Organization.objects.all().order_by("name")
+        if can_manage_all_organizations(user):
+            organizations_qs = list(Organization.objects.all().order_by("name"))
         else:
             memberships = OrganizationMembership.objects.filter(user=user, is_active=True).select_related("organization")
             membership_map = {membership.organization_id: membership.role for membership in memberships}
             organizations_qs = [membership.organization for membership in memberships]
+        if organization_id:
+            selected_organization = get_organization_for_user(user, organization_id)
+        elif organizations_qs:
+            selected_organization = organizations_qs[0]
         for organization in organizations_qs:
             wallet = ensure_organization_wallet(organization)
             pending_approvals = PaymentBatch.objects.filter(
@@ -1396,41 +2902,62 @@ def build_dashboard(user):
                 {
                     "organization_id": str(organization.id),
                     "name": organization.name,
-                    "role": membership_map.get(organization.id, "SUPERADMIN"),
+                    "role": membership_map.get(
+                        organization.id,
+                        "SERVICE_PROVIDER" if user.account_type == User.AccountType.SERVICE_PROVIDER else "SUPERADMIN",
+                    ),
                     "kyc_status": organization.kyc_status,
                     "wallet_balance_minor": wallet.available_balance_minor,
                     "pending_approvals": pending_approvals,
                 }
             )
-    if user.account_type == User.AccountType.SUPERADMIN:
-        return {
-            "account_type": user.account_type,
-            "individual": individual_dashboard,
-            "organizations": organizations,
-        }
-    if user.account_type == User.AccountType.CORPORATE:
-        return {"account_type": user.account_type, "organizations": organizations}
 
-    if can_access_individual_features(user):
-        upcoming = [
-            {
-                "schedule_id": str(schedule.id),
-                "payee_label": schedule.payee.label,
-                "amount_minor": schedule.amount_minor,
-                "day_of_month": schedule.day_of_month,
-                "category": schedule.payee.expense_category,
-            }
-            for schedule in active_schedules.order_by("day_of_month")[:10]
-        ]
-        return {
-            "account_type": user.account_type,
-            "wallet_balance_minor": primary_wallet.available_balance_minor,
-            "vault_balance_minor": vault_wallet.available_balance_minor if vault_wallet else 0,
-            "monthly_commitments_minor": monthly_commitments,
-            "missing_capital_minor": max(monthly_commitments - primary_wallet.available_balance_minor, 0),
-            "upcoming_schedules": upcoming,
+    if selected_organization:
+        org_wallet = ensure_organization_wallet(selected_organization)
+        recent_org_transactions = [_serialize_activity_instruction(item) for item in _instruction_queryset_for_user(user, str(selected_organization.id))[:5]]
+        member_counts = {
+            "total": OrganizationMembership.objects.filter(organization=selected_organization, is_active=True).count(),
+            "admins": OrganizationMembership.objects.filter(
+                organization=selected_organization, is_active=True, role=OrganizationMembership.Role.ADMIN
+            ).count(),
+            "makers": OrganizationMembership.objects.filter(
+                organization=selected_organization, is_active=True, role=OrganizationMembership.Role.MAKER
+            ).count(),
+            "checkers": OrganizationMembership.objects.filter(
+                organization=selected_organization, is_active=True, role=OrganizationMembership.Role.CHECKER
+            ).count(),
+            "viewers": OrganizationMembership.objects.filter(
+                organization=selected_organization, is_active=True, role=OrganizationMembership.Role.VIEWER
+            ).count(),
         }
-    return {"account_type": user.account_type, "organizations": organizations}
+        dashboard["selected_organization"] = {
+            "organization_id": str(selected_organization.id),
+            "name": selected_organization.name,
+            "registration_number": selected_organization.registration_number,
+            "kyc_status": selected_organization.kyc_status,
+            "wallet_balance_minor": org_wallet.available_balance_minor,
+            "pending_approvals": PaymentBatch.objects.filter(
+                organization=selected_organization,
+                status=PaymentBatch.Status.PENDING_APPROVAL,
+            ).count(),
+            "recent_batches": [
+                {
+                    "batch_id": str(batch.id),
+                    "description": batch.description,
+                    "status": batch.status,
+                    "scheduled_for": batch.scheduled_for.isoformat(),
+                    "instruction_count": batch.instructions.count(),
+                    "gross_amount_minor": batch.total_amount_minor + batch.fee_amount_minor,
+                }
+                for batch in list_batches(user, str(selected_organization.id))[:5]
+            ],
+            "recent_transactions": recent_org_transactions,
+            "member_counts": member_counts,
+        }
+
+    if organizations:
+        dashboard["organizations"] = organizations
+    return dashboard
 
 
 def create_due_notifications(run_date=None):
@@ -1473,6 +3000,8 @@ def export_transactions_csv_rows(user, organization_id=None):
     if organization_id:
         organization = get_organization_for_user(user, organization_id)
         queryset = queryset.filter(batch__organization=organization)
+    elif can_manage_all_organizations(user):
+        queryset = queryset
     else:
         queryset = queryset.filter(batch__user=user)
     for instruction in queryset:
@@ -1482,6 +3011,8 @@ def export_transactions_csv_rows(user, organization_id=None):
             "recipient_name": instruction.recipient_name,
             "recipient_type": instruction.recipient_type,
             "amount_minor": instruction.amount_minor,
+            "fee_amount_minor": instruction.fee_amount_minor,
+            "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
             "status": instruction.status,
             "category": instruction.category,
             "scheduled_for": instruction.batch.scheduled_for.isoformat(),

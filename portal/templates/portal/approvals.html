@@ -1,0 +1,65 @@
+{% extends "portal/base.html" %}
+{% load portal_tags %}
+{% block title %}Approvals{% endblock %}
+{% block page_heading %}{{ page_title }}{% endblock %}
+{% block page_subheading %}{{ page_description }}{% endblock %}
+{% block page_actions %}
+  <a class="button primary" href="{% url 'portal:payments' %}">Back to payments</a>
+{% endblock %}
+{% block content %}
+  <div class="content-grid">
+    <section class="surface">
+      <h2>Pending queue</h2>
+      <div class="panel-list">
+        {% for batch in pending_batches %}
+          <a class="panel-item" href="{% url 'portal:approvals' %}?organization_id={{ selected_organization.id }}&batch_id={{ batch.id }}">
+            <div style="display:flex;justify-content:space-between;gap:12px;">
+              <div>
+                <strong>{{ batch.description|default:batch.batch_kind|human_label }}</strong>
+                <div class="muted">{{ batch.instructions.count }} payouts · {{ batch.scheduled_for|date:"d M Y" }}</div>
+              </div>
+              <div class="amount">{{ batch.total_amount_minor|money }}</div>
+            </div>
+          </a>
+        {% empty %}
+          <div class="muted">No pending approvals.</div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="surface">
+      {% if selected_batch %}
+        <div class="surface-header">
+          <h2>{{ selected_batch.description|default:selected_batch.batch_kind|human_label }}</h2>
+          <span class="chip {{ selected_batch.status|tone }}">{{ selected_batch.status|human_label }}</span>
+        </div>
+        <div class="stat-grid" style="margin-bottom: 16px;">
+          <div class="mini-stat"><span class="muted">Principal</span><strong>{{ selected_batch.total_amount_minor|money }}</strong></div>
+          <div class="mini-stat"><span class="muted">Service charge</span><strong>{{ fees_display }}</strong></div>
+          <div class="mini-stat"><span class="muted">Payouts</span><strong>{{ selected_batch.instructions.count }}</strong></div>
+          <div class="mini-stat"><span class="muted">Mode</span><strong>{{ selected_batch.payment_mode }}</strong></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Recipient</th><th>Rail</th><th>Amount</th><th>Fee</th><th>Category</th></tr>
+            </thead>
+            <tbody>
+              {% for instruction in preview_instructions %}
+                <tr>
+                  <td>{{ instruction.recipient_name }}</td>
+                  <td><span class="chip {{ instruction.recipient_type|tone }}">{{ instruction.recipient_type|human_label }}</span></td>
+                  <td class="amount">{{ instruction.amount_minor|money }}</td>
+                  <td class="amount">{{ instruction.fee_amount_minor|money }}</td>
+                  <td>{{ instruction.category|human_label }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="muted">Select a batch to inspect its payout preview and service charges.</div>
+      {% endif %}
+    </section>
+  </div>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% extends "portal/base.html" %}
+{% block title %}Payments{% endblock %}
+{% block page_heading %}{{ page_title }}{% endblock %}
+{% block page_subheading %}{{ page_description }}{% endblock %}
+{% block page_actions %}
+  <a class="button primary" href="{% url 'portal:approvals' %}">Review approvals</a>
+{% endblock %}
+{% block content %}
+  <section class="surface">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Batch</th><th>Status</th><th>Mode</th><th>Payouts</th><th>Principal</th><th>Service charge</th><th>Gross</th><th>Scheduled</th></tr>
+        </thead>
+        <tbody>
+          {% for batch in batches %}
+            <tr>
+              <td>{{ batch.label }}</td>
+              <td><span class="chip {{ batch.status_tone }}">{{ batch.status }}</span></td>
+              <td><span class="chip {{ batch.payment_tone }}">{{ batch.payment_mode }}</span></td>
+              <td>{{ batch.instruction_count }}</td>
+              <td class="amount">{{ batch.total_display }}</td>
+              <td class="amount">{{ batch.fee_display }}</td>
+              <td class="amount">{{ batch.gross_display }}</td>
+              <td>{{ batch.scheduled_for|date:"d M Y" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="8" class="muted">No batches yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

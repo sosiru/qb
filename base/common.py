@@ -13,6 +13,10 @@ NOTIFICATION_EVENT_TYPE_CHOICES = [
     ("APPROVAL_REQUEST", "Approval Request"),
     ("BATCH_APPROVED", "Batch Approved"),
     ("BATCH_REJECTED", "Batch Rejected"),
+    ("SELF_ONBOARDING", "Self Onboarding"),
+    ("LOGIN_OTP", "Login OTP"),
+    ("LOGIN_SUCCESS", "Login Success"),
+    ("ORGANIZATION_INVITE", "Organization Invite"),
 ]
 
 

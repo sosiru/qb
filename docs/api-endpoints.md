@@ -1,6 +1,6 @@
 # API Endpoints
 
-Base URL: `http://127.0.0.1:8006/api/v1`
+Base URL: `http://127.0.0.1:8000/api/v1`
 
 Auth uses `Authorization: Bearer <token>`.
 
@@ -20,11 +20,17 @@ For machine-to-machine integrations, you can also authenticate with:
 - `PATCH /auth/me/`
 - `POST /auth/change-password/`
 
+Login is OTP-based:
+
+1. `POST /auth/login/` with `phone_number` and `password`
+2. API returns `202` with `otp_required: true`
+3. `POST /auth/login/` again with `phone_number`, `password`, and `otp`
+
 ### Register example
 
 ```json
 {
-  "phone_number": "+254700000001",
+  "phone_number": "254700000001",
   "password": "StrongPass123!",
   "full_name": "Alice Example",
   "account_type": "INDIVIDUAL",
@@ -32,9 +38,31 @@ For machine-to-machine integrations, you can also authenticate with:
 }
 ```
 
+### Login verify payload
+
+```json
+{
+  "phone_number": "254700000001",
+  "password": "StrongPass123!",
+  "otp": "123456"
+}
+```
+
+For the default test account `254710956633`, the backend accepts any 6-digit OTP during login.
+
 ## Dashboard
 
 - `GET /dashboard/`
+- `GET /dashboard/?organization_id={organization_id}`
+
+Dashboard responses are now screen-oriented and include richer UI data such as:
+
+- wallet and vault balances
+- due-this-month schedules with fee and gross totals
+- recent transactions
+- category breakdowns
+- monthly trend data
+- selected organization summary when `organization_id` is supplied
 
 ## Integrations
 
@@ -82,8 +110,19 @@ For machine-to-machine integrations, you can also authenticate with:
 }
 ```
 
+### Organization payload fields
+
+- `name`
+- `registration_number`
+- `default_currency`
+- `push_notifications_enabled`
+- `sms_notifications_enabled`
+- `kyc_status` for superadmins only
+
 ## Payee Directory
 
+- `GET /payee-presets/`
+- `GET /payee-presets/?q={search}&payee_type={PAYBILL|TILL|MOBILE|BANK}&active={true|false}`
 - `GET /payees/`
 - `GET /payees/?organization_id={organization_id}`
 - `GET /payees/?q={search}&payee_type={PAYBILL|TILL|MOBILE|BANK}&active={true|false}`
@@ -93,6 +132,29 @@ For machine-to-machine integrations, you can also authenticate with:
 - `DELETE /payees/{payee_id}/`
 
 ### Payee payload examples
+
+Preset response example:
+
+```json
+{
+  "id": "preset-uuid",
+  "label": "KPLC",
+  "payee_type": "PAYBILL",
+  "paybill_number": "888880",
+  "till_number": "",
+  "expense_category": "utilities",
+  "active": true
+}
+```
+
+Create a payee from a preset:
+
+```json
+{
+  "preset_id": "preset-uuid",
+  "account_reference": "12345678"
+}
+```
 
 ```json
 {
@@ -131,6 +193,9 @@ For machine-to-machine integrations, you can also authenticate with:
   "payee_id": "payee-uuid",
   "amount_minor": 300000,
   "day_of_month": 5,
+  "interval_months": 3,
+  "next_due_date": "2026-07-05",
+  "requires_approval": true,
   "active": true
 }
 ```
@@ -143,6 +208,7 @@ For machine-to-machine integrations, you can also authenticate with:
 - `GET /wallets/ledger/?organization_id={organization_id}&wallet_type={PRIMARY|VAULT}&entry_type={TOP_UP|DISBURSEMENT|TRANSFER_TO_VAULT|TRANSFER_FROM_VAULT|ADJUSTMENT}`
 - `POST /wallets/topups/`
 - `POST /wallets/vault/`
+- `POST /wallets/withdrawals/`
 
 ### Top-up payload
 
@@ -175,9 +241,19 @@ For individual accounts, set `"wallet_type": "VAULT"` to send the deposit direct
 }
 ```
 
+### M-Pesa withdrawal payload
+
+```json
+{
+  "amount_minor": 10000,
+  "phone_number": "254711223344"
+}
+```
+
 ## Individual payments
 
 - `POST /payments/pay-all/`
+- `POST /payments/quick-pay/`
 
 ```json
 {
@@ -191,6 +267,47 @@ Optional:
 - `schedule_ids`: array of schedule UUIDs
 - `payment_mode`: `WALLET` or `STK`
 - `simulate_collection`: set `false` to enqueue a real PesaWay collection request when `payment_mode` is `STK`
+
+### Quick pay payload
+
+```json
+{
+  "payee_id": "payee-uuid",
+  "amount_minor": 25000,
+  "payment_mode": "WALLET",
+  "simulate_collection": true,
+  "description": "Quick pay from UI"
+}
+```
+
+For organization flows:
+
+```json
+{
+  "organization_id": "org-uuid",
+  "payee_id": "payee-uuid",
+  "amount_minor": 25000,
+  "payment_mode": "WALLET",
+  "submit_for_approval": true,
+  "description": "Corporate quick pay from UI"
+}
+```
+
+When `organization_id` is supplied, the backend creates a single-instruction corporate batch and can submit it straight into the approval queue.
+
+## Approvals
+
+- `GET /approvals/`
+- `GET /approvals/?organization_id={organization_id}`
+
+This endpoint returns screen-ready approval queue items with:
+
+- base payout
+- fee amount
+- gross debit
+- submitter
+- scheduled run date
+- sample instructions
 
 ## Corporate batches
 
@@ -212,7 +329,7 @@ Optional:
   "payment_mode": "WALLET",
   "source_file_name": "vendor-batch.csv",
   "description": "July vendor run",
-  "csv_content": "recipient_name,recipient_type,amount_minor,category,phone_number,external_reference\nVendor A,MOBILE,100000,payroll,+254711111111,EMP001\nVendor B,MOBILE,50000,payroll,+254722222222,EMP002"
+  "csv_content": "recipient_name,recipient_type,amount_minor,category,phone_number,external_reference\nVendor A,MOBILE,100000,payroll,254711111111,EMP001\nVendor B,MOBILE,50000,payroll,254722222222,EMP002"
 }
 ```
 
@@ -228,6 +345,20 @@ Optional:
 
 - `GET /reports/transactions.csv`
 - `GET /reports/transactions.csv?organization_id={organization_id}`
+- `GET /reports/transactions/summary/`
+- `GET /reports/transactions/summary/?organization_id={organization_id}&date_from={YYYY-MM-DD}&date_to={YYYY-MM-DD}`
+- `GET /reports/exports/`
+- `GET /reports/exports/?organization_id={organization_id}`
+
+### Transaction summary response
+
+Provides statement-style aggregates and rows for the UI:
+
+- opening balance
+- total debits
+- total credits
+- total fees
+- transaction rows with base, fee, and gross amounts
 
 ## Provider callbacks
 

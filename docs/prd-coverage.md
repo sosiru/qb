@@ -1,6 +1,6 @@
 # PRD Coverage
 
-This file tracks the backend status against the current Route PRD from a software-engineering perspective.
+This file tracks the backend status against the current Quick Bundl PRD from a software-engineering perspective.
 
 ## Implemented
 

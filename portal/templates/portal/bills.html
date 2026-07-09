@@ -1,0 +1,42 @@
+{% extends "portal/base.html" %}
+{% load portal_tags %}
+{% block title %}Bills{% endblock %}
+{% block page_heading %}{{ page_title }}{% endblock %}
+{% block page_subheading %}{{ page_description }}{% endblock %}
+{% block page_actions %}
+  <a class="button primary" href="{% url 'portal:statements' %}">Open statements</a>
+{% endblock %}
+{% block content %}
+  <section class="surface">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>Reference</th><th>Category</th><th>Amount</th><th>Cadence</th><th>Next due</th><th>Approval</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          {% for row in bill_rows %}
+            <tr>
+              <td>{{ row.label }}</td>
+              <td><span class="chip {{ row.type_tone }}">{{ row.type|human_label }}</span></td>
+              <td>{{ row.reference }}</td>
+              <td>{{ row.category }}</td>
+              <td class="amount">{{ row.amount_display }}</td>
+              <td>{{ row.cadence_label }} · {{ row.day_label }}</td>
+              <td>{{ row.next_due_label }}</td>
+              <td>
+                {% if row.requires_approval %}
+                  <span class="chip warning">Approval required</span>
+                {% else %}
+                  <span class="chip success">Auto-clear</span>
+                {% endif %}
+              </td>
+              <td><span class="chip {{ row.status_tone }}">{{ row.status }}</span></td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="9" class="muted">No payees or beneficiaries yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

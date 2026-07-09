@@ -1,0 +1,162 @@
+{% extends "portal/base.html" %}
+{% load portal_tags %}
+{% block title %}Quick Bundl Portal{% endblock %}
+{% block page_heading %}{{ hero.title }}{% endblock %}
+{% block page_subheading %}{{ hero.subtitle }}{% endblock %}
+{% block page_actions %}
+  <a class="button primary" href="{% url 'portal:wallet' %}">Fund wallet</a>
+  <a class="button" href="{% url 'portal:reports' %}">View reports</a>
+{% endblock %}
+{% block content %}
+  <section class="hero-panel">
+    <div class="hero-copy">
+      <div class="muted">{{ hero.eyebrow }}</div>
+      <h1>{{ hero.title }}</h1>
+      <p>{{ hero.subtitle }}</p>
+    </div>
+    <div class="hero-metrics">
+      <div class="metric">
+        <span class="muted">{{ hero.primary_label }}</span>
+        <strong>{{ hero.primary_metric }}</strong>
+      </div>
+      <div class="metric">
+        <span class="muted">{{ hero.secondary_label }}</span>
+        <strong>{{ hero.secondary_metric }}</strong>
+      </div>
+    </div>
+  </section>
+
+  {% if transaction_summary %}
+    <section class="stat-grid" style="margin-bottom: 18px;">
+      <div class="mini-stat"><span class="muted">Disbursed</span><strong>{{ transaction_summary.total_amount_display }}</strong></div>
+      <div class="mini-stat"><span class="muted">Service charges</span><strong>{{ transaction_summary.total_fee_display }}</strong></div>
+      <div class="mini-stat"><span class="muted">Transactions</span><strong>{{ transaction_summary.count }}</strong></div>
+      <div class="mini-stat"><span class="muted">Success rate</span><strong>{{ transaction_summary.success_rate }}%</strong></div>
+    </section>
+  {% endif %}
+
+  <div class="content-grid">
+    <div class="stack">
+      {% if recent_batches %}
+        <section class="surface">
+          <div class="surface-header">
+            <h2>Recent batches</h2>
+            <a class="button subtle" href="{% url 'portal:payments' %}">Open queue</a>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Batch</th><th>Status</th><th>Payouts</th><th>Total</th><th>Fees</th></tr>
+              </thead>
+              <tbody>
+                {% for batch in recent_batches %}
+                  <tr>
+                    <td>{{ batch.description|default:batch.batch_kind|human_label }}</td>
+                    <td><span class="chip {{ batch.status|tone }}">{{ batch.status|human_label }}</span></td>
+                    <td>{{ batch.instructions.count }}</td>
+                    <td class="amount">{{ batch.total_amount_minor|money }}</td>
+                    <td class="amount">{{ batch.fee_amount_minor|money }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      {% elif recent_ledger %}
+        <section class="surface">
+          <div class="surface-header">
+            <h2>Recent wallet activity</h2>
+            <a class="button subtle" href="{% url 'portal:wallet' %}">Open wallet</a>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Date</th><th>Reference</th><th>Type</th><th>Amount</th><th>Balance</th></tr>
+              </thead>
+              <tbody>
+                {% for entry in recent_ledger %}
+                  <tr>
+                    <td>{{ entry.created_at|date:"d M Y" }}</td>
+                    <td>{{ entry.reference }}</td>
+                    <td>{{ entry.entry_type|human_label }}</td>
+                    <td class="amount">{{ entry.amount_minor|money }}</td>
+                    <td class="amount">{{ entry.balance_after_minor|money }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      {% endif %}
+
+      <section class="surface">
+        <div class="surface-header">
+          <h2>{% if selected_organization %}Beneficiaries{% else %}Upcoming commitments{% endif %}</h2>
+          <a class="button subtle" href="{% url 'portal:bills' %}">Open directory</a>
+        </div>
+        <div class="panel-list">
+          {% for payee in payees_preview %}
+            <div class="panel-item">
+              <div style="display:flex;justify-content:space-between;gap:12px;">
+                <div>
+                  <strong>{{ payee.label }}</strong>
+                  <div class="muted">{{ payee.expense_category|human_label }}</div>
+                </div>
+                <span class="chip {{ payee.payee_type|tone }}">{{ payee.payee_type|human_label }}</span>
+              </div>
+            </div>
+          {% empty %}
+            <div class="muted">No payees available yet.</div>
+          {% endfor %}
+        </div>
+      </section>
+    </div>
+
+    <div class="stack">
+      {% if transaction_summary.categories %}
+        <section class="surface">
+          <h2>Spend by category</h2>
+          <div class="donut"></div>
+          <div class="panel-list">
+            {% for category in transaction_summary.categories %}
+              <div style="display:flex;justify-content:space-between;gap:12px;">
+                <span>{{ category.name }}</span>
+                <strong>{{ category.percent }}%</strong>
+              </div>
+            {% endfor %}
+          </div>
+        </section>
+      {% elif category_breakdown %}
+        <section class="surface">
+          <h2>Bill mix</h2>
+          <div class="panel-list">
+            {% for category in category_breakdown %}
+              <div>
+                <div style="display:flex;justify-content:space-between;gap:12px;">
+                  <span>{{ category.name }}</span>
+                  <strong>{{ category.amount_display }}</strong>
+                </div>
+                <div class="progress-track" style="margin-top:8px;">
+                  <div class="progress-bar" style="width: {{ category.percent }}%;"></div>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        </section>
+      {% endif %}
+      <section class="surface">
+        <h2>Operational notes</h2>
+        <div class="panel-list">
+          <div class="panel-item">
+            <strong>2% service charge active</strong>
+            <div class="muted">Every transaction in the workspace carries a 2% processing fee, reflected in batch totals and statements.</div>
+          </div>
+          <div class="panel-item">
+            <strong>RBAC aware workspace</strong>
+            <div class="muted">Navigation and organization selection follow your account type and organization role.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+{% endblock %}

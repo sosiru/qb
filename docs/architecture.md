@@ -1,4 +1,4 @@
-# Route (Bundl Pay) MVP Architecture
+# Quick Bundl MVP Architecture
 
 ## 1. Goal
 Build the smallest backend that can safely support:
@@ -99,7 +99,7 @@ qb/
 │   ├── architecture.md
 │   └── database-schema.md
 ├── postman/
-│   └── route-mvp.postman_collection.json
+│   └── quickbundl.postman_collection.json
 ├── qb/
 │   ├── settings.py
 │   ├── urls.py

@@ -1,0 +1,52 @@
+{% extends "portal/base.html" %}
+{% block title %}Wallet{% endblock %}
+{% block page_heading %}{{ page_title }}{% endblock %}
+{% block page_subheading %}{{ page_description }}{% endblock %}
+{% block page_actions %}
+  <a class="button primary" href="{% url 'portal:statements' %}">View statements</a>
+{% endblock %}
+{% block content %}
+  <section class="hero-panel">
+    <div class="hero-copy">
+      <div class="muted">Available balance</div>
+      <h1>{{ balance_display }}</h1>
+      <p>Net inflows {{ incoming_display }} · outflows {{ outgoing_display }}</p>
+    </div>
+    <div class="hero-metrics">
+      <div class="metric">
+        <span class="muted">Inflows</span>
+        <strong>{{ incoming_display }}</strong>
+      </div>
+      <div class="metric">
+        <span class="muted">Outflows</span>
+        <strong>{{ outgoing_display }}</strong>
+      </div>
+    </div>
+  </section>
+  <section class="surface">
+    <div class="surface-header">
+      <h2>Recent activity</h2>
+      <a class="button subtle" href="{% url 'portal:reports' %}">Open analytics</a>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Reference</th><th>Type</th><th>Amount</th><th>Balance after</th></tr>
+        </thead>
+        <tbody>
+          {% for row in ledger_rows %}
+            <tr>
+              <td>{{ row.created_at|date:"d M Y H:i" }}</td>
+              <td>{{ row.reference }}</td>
+              <td><span class="chip {{ row.entry_tone }}">{{ row.entry_type }}</span></td>
+              <td class="amount">{{ row.amount_display }}</td>
+              <td class="amount">{{ row.balance_display }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="5" class="muted">No wallet activity yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

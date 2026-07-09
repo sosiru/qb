@@ -1,0 +1,82 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Quick Bundl Portal{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'portal/app.css' %}">
+</head>
+<body>
+  <div class="portal-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">R</div>
+        <div class="brand-copy">
+          <strong>Quick Bundl</strong>
+          <span>Workspace</span>
+        </div>
+      </div>
+      <nav class="nav-list">
+        {% for item in sidebar_items %}
+          <a class="nav-link{% if active_page == item.key %} active{% endif %}" href="{{ item.url }}">
+            <span>{{ item.label }}</span>
+            {% if item.key == "approvals" and selected_organization_meta and selected_organization_meta.pending_approvals %}
+              <small>{{ selected_organization_meta.pending_approvals }}</small>
+            {% endif %}
+          </a>
+        {% endfor %}
+      </nav>
+      <div class="sidebar-footer">
+        <div>{{ scope_label }}</div>
+        <div>{{ role_label }}</div>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="topbar screen-only">
+        <div class="searchbox">
+          <input type="search" placeholder="Search bills, providers, transactions, batches">
+        </div>
+        {% if organizations %}
+          <div class="workspace-select">
+            <select onchange="window.location='{{ request.path }}?organization_id=' + this.value;">
+              {% for organization in organizations %}
+                <option value="{{ organization.organization_id }}"{% if selected_organization and organization.organization_id == selected_organization.id|stringformat:'s' %} selected{% endif %}>
+                  {{ organization.name }} · {{ organization.role|title }}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+        {% else %}
+          <div class="workspace-select">
+            <select disabled>
+              <option>{{ scope_label }}</option>
+            </select>
+          </div>
+        {% endif %}
+        <div class="profile-strip">
+          <div class="avatar">{{ request.user.full_name|slice:":1"|upper }}</div>
+          <div>
+            <div><strong>{{ request.user.full_name }}</strong></div>
+            <div class="muted">{{ request.user.account_type|title }}</div>
+          </div>
+          <a class="button subtle" href="{% url 'portal:logout' %}">Sign out</a>
+        </div>
+      </div>
+
+      <header class="page-header">
+        <div>
+          <div class="muted">{{ scope_label }}</div>
+          <h1>{% block page_heading %}{% endblock %}</h1>
+          <p>{% block page_subheading %}{% endblock %}</p>
+        </div>
+        <div class="cta-row screen-only">
+          {% block page_actions %}{% endblock %}
+        </div>
+      </header>
+
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

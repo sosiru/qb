@@ -1,0 +1,1629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quick Bundl — Payments OS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F5F3ED;
+    --surface:#FFFFFF;
+    --surface-sunk:#F1EEE5;
+    --surface-hover:#FAF9F4;
+    --line:#E5E0D3;
+    --line-soft:#EEEAE0;
+    --ink:#12181A;
+    --ink-soft:#454E49;
+    --slate:#767E78;
+    --slate-soft:#A3A99E;
+
+    --brand-900:#072A20;
+    --brand-800:#0A4A38;
+    --brand-700:#0D6B4F;
+    --brand-600:#0F9468;
+    --brand-500:#17B67D;
+    --brand-400:#4FD79D;
+    --brand-100:#D9F3E7;
+    --brand-050:#EEFAF3;
+
+    --amber-700:#B4640A;
+    --amber-500:#F0A93A;
+    --amber-100:#FBEBCE;
+
+    --red-700:#C23A26;
+    --red-500:#EC5B41;
+    --red-100:#FAE2DC;
+
+    --blue-700:#1E4FCB;
+    --blue-500:#4C7CF2;
+    --blue-100:#E1E9FC;
+
+    --violet-700:#6A3FC7;
+    --violet-500:#8B63EE;
+    --violet-100:#EDE5FD;
+
+    /* chart accent palette — distinct hues, not shades of one color, so charts read vivid */
+    --chart-1:#0F9468;
+    --chart-2:#F0A93A;
+    --chart-3:#4C7CF2;
+    --chart-4:#8B63EE;
+    --chart-5:#EC5B41;
+    --chart-track:#EAE6D9;
+
+    --radius-lg:16px;
+    --radius-md:12px;
+    --radius-sm:8px;
+    --ease: cubic-bezier(.2,.7,.3,1);
+
+    /* layered, low-contrast elevation — closer to Stripe/Fluent than a single hard drop shadow */
+    --shadow-xs: 0 1px 1px rgba(16,20,18,0.04);
+    --shadow-card: 0 0 0 1px rgba(16,20,18,0.03), 0 1px 2px rgba(16,20,18,0.04), 0 8px 24px -12px rgba(16,20,18,0.12);
+    --shadow-card-hover: 0 0 0 1px rgba(16,20,18,0.04), 0 2px 4px rgba(16,20,18,0.05), 0 16px 36px -14px rgba(16,20,18,0.16);
+    --shadow-pop: 0 14px 34px -8px rgba(15,148,104,0.34), 0 4px 10px -4px rgba(7,42,32,0.28);
+    --shadow-ring: 0 0 0 3px var(--brand-100), 0 0 0 1px var(--brand-500);
+  }
+
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Inter',ui-sans-serif,system-ui,sans-serif;
+    font-size:13.5px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .num, .mono{ font-family:'JetBrains Mono', ui-monospace, monospace; letter-spacing:-0.01em; }
+  .display{ font-family:'Fraunces', serif; }
+  h1,h2,h3,h4{ margin:0; font-family:'Fraunces', serif; font-weight:600; letter-spacing:-0.01em; }
+  p{margin:0;}
+  a{color:inherit;}
+  button{font-family:inherit;}
+  ::selection{ background:var(--brand-100); }
+
+  button, input, select{ outline:none; }
+  button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible{
+    box-shadow:var(--shadow-ring);
+    border-radius:8px;
+  }
+
+  #root{ min-height:100vh; }
+
+  /* ---------- scrollbars ---------- */
+  ::-webkit-scrollbar{ width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb{ background:#DCD8CC; border-radius:20px; border:2px solid var(--paper); }
+  ::-webkit-scrollbar-track{ background:transparent; }
+
+  /* ================= AUTH ================= */
+  .auth-wrap{
+    min-height:100vh; display:grid; grid-template-columns: minmax(0,460px) 1fr;
+    background:var(--surface);
+  }
+  @media (max-width: 860px){ .auth-wrap{ grid-template-columns: 1fr; } .auth-side{ display:none; } }
+
+  .auth-form{ padding:56px 56px; display:flex; flex-direction:column; min-height:100vh; }
+  .auth-brand{ display:flex; align-items:center; gap:10px; margin-bottom:56px; }
+  .auth-brand .mark{ width:34px; height:34px; border-radius:9px; background:var(--brand-800); color:#fff; display:flex; align-items:center; justify-content:center; font-family:'Fraunces',serif; font-weight:700; font-size:14px; }
+  .auth-brand .name{ font-weight:700; font-size:15px; letter-spacing:-0.01em; }
+  .auth-brand .sub{ font-size:10px; letter-spacing:0.12em; color:var(--slate); text-transform:uppercase; margin-top:1px; }
+
+  .auth-body{ max-width:340px; flex:1; }
+  .step-tag{ font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:var(--brand-600); font-weight:600; margin-bottom:14px; display:flex; align-items:center; gap:8px;}
+  .step-tag .dot-sep{ color:var(--line); }
+  .auth-body h1{ font-size:26px; margin-bottom:8px; color:var(--ink); }
+  .auth-body .desc{ color:var(--slate); font-size:13.5px; margin-bottom:30px; }
+
+  .field{ margin-bottom:18px; }
+  .field label{ display:flex; justify-content:space-between; font-size:11px; letter-spacing:0.08em; text-transform:uppercase; color:var(--ink-soft); font-weight:600; margin-bottom:7px; }
+  .field label a{ color:var(--brand-600); text-transform:none; letter-spacing:0; font-weight:600; cursor:pointer; }
+  .field input{
+    width:100%; padding:12px 14px; border-radius:10px; border:1.5px solid var(--line);
+    background:var(--surface); font-size:14px; color:var(--ink); font-family:'JetBrains Mono', monospace;
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  .field input:focus{ border-color:var(--brand-500); }
+
+  .btn{
+    appearance:none; border:none; cursor:pointer; border-radius:10px; font-weight:600;
+    display:inline-flex; align-items:center; justify-content:center; gap:8px;
+    transition:transform .12s var(--ease), background .18s var(--ease), box-shadow .18s var(--ease), border-color .18s var(--ease), color .18s var(--ease);
+    white-space:nowrap;
+  }
+  .btn:active{ transform:translateY(1px) scale(.99); }
+  .btn-primary{ background:linear-gradient(155deg, var(--brand-700), var(--brand-800)); color:#fff; padding:12px 18px; font-size:14px; width:100%; box-shadow: var(--shadow-pop); }
+  .btn-primary:hover{ background:linear-gradient(155deg, var(--brand-600), var(--brand-700)); box-shadow:0 14px 36px -8px rgba(10,52,43,0.38), 0 4px 10px -4px rgba(10,52,43,0.26); }
+  .btn-dark{ background:var(--ink); color:#fff; padding:9px 14px; font-size:13px; }
+  .btn-dark:hover{ background:#26302B; }
+  .btn-ghost{ background:var(--surface); color:var(--ink); border:1.5px solid var(--line); padding:9px 14px; font-size:13px; }
+  .btn-ghost:hover{ border-color:var(--slate-soft); background:var(--surface-hover); }
+  .btn-sm{ padding:7px 11px; font-size:12px; border-radius:8px; }
+  .btn-link{ background:none; border:none; color:var(--brand-600); font-weight:600; cursor:pointer; font-size:13px; padding:0; }
+  .btn-link:hover{ text-decoration:underline; }
+  .btn[disabled]{ opacity:.5; cursor:not-allowed; }
+
+  .auth-foot{ display:flex; justify-content:space-between; align-items:center; font-size:11.5px; color:var(--slate-soft); padding-top:24px; flex-wrap:wrap; gap:10px;}
+  .auth-foot a{ color:var(--slate); text-decoration:none; margin-right:14px; }
+  .status-chip{ display:inline-flex; align-items:center; gap:6px; color:var(--brand-600); font-weight:600; }
+  .status-chip .pulse{ width:6px; height:6px; border-radius:50%; background:var(--brand-500); box-shadow:0 0 0 0 rgba(28,136,112,.5); animation:pulse 2s infinite; }
+  @keyframes pulse{ 0%{box-shadow:0 0 0 0 rgba(28,136,112,.45)} 70%{box-shadow:0 0 0 6px rgba(28,136,112,0)} 100%{box-shadow:0 0 0 0 rgba(28,136,112,0)} }
+
+  .auth-side{
+    background:
+      radial-gradient(1000px 600px at 100% 0%, rgba(255,255,255,0.05), transparent 60%),
+      linear-gradient(155deg, var(--brand-900) 0%, #0A2B24 55%, #081F1A 100%);
+    color:#fff; padding:60px 56px; display:flex; flex-direction:column; justify-content:space-between; position:relative; overflow:hidden;
+  }
+  .auth-side::before{
+    content:''; position:absolute; inset:0; opacity:0.5;
+    background-image: linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size: 42px 42px;
+    mask-image: radial-gradient(circle at 70% 20%, black, transparent 75%);
+  }
+  .auth-side > *{ position:relative; z-index:1; }
+  .eyebrow{ font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:#8FCBB8; font-weight:600; margin-bottom:18px; }
+  .auth-side h2{ font-size:34px; line-height:1.18; font-weight:500; max-width:480px; margin-bottom:40px; }
+  .side-card{ background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:20px; margin-bottom:14px; backdrop-filter:blur(6px); }
+  .side-card .ic{ width:32px; height:32px; border-radius:9px; background:rgba(255,255,255,0.1); display:flex; align-items:center; justify-content:center; margin-bottom:12px; }
+  .side-card h4{ font-family:'Inter'; font-size:14.5px; font-weight:700; margin-bottom:6px; }
+  .side-card p{ font-size:12.5px; color:#C6D9D2; line-height:1.5; }
+  .trust-line{ font-family:'JetBrains Mono', monospace; font-size:11.5px; color:#7FA99B; letter-spacing:0.01em; }
+
+  .otp-row{ display:flex; gap:9px; margin-bottom:8px; }
+  .otp-box{ width:46px; height:54px; border-radius:10px; border:1.5px solid var(--line); text-align:center; font-size:20px; font-family:'JetBrains Mono',monospace; font-weight:600; color:var(--ink); background:var(--surface); }
+  .otp-box:focus{ border-color:var(--brand-500); }
+  .otp-meta{ display:flex; justify-content:space-between; font-size:12px; color:var(--slate); margin-bottom:26px; }
+
+  /* ================= APP SHELL ================= */
+  .shell{ display:flex; min-height:100vh; }
+  .sidebar{
+    width:246px; flex:none; background:var(--surface); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; padding:18px 14px; position:sticky; top:0; height:100vh;
+    z-index:40;
+  }
+  .brand-row{ display:flex; align-items:center; gap:10px; padding:6px 8px 22px; }
+  .brand-row .mark{ width:32px; height:32px; border-radius:9px; background:var(--brand-800); color:#fff; display:flex; align-items:center; justify-content:center; font-family:'Fraunces',serif; font-weight:700; font-size:13px; flex:none; }
+  .brand-row .name{ font-weight:700; font-size:14.5px; letter-spacing:-0.01em; line-height:1.1; }
+  .brand-row .sub{ font-size:9.5px; letter-spacing:0.12em; color:var(--slate); text-transform:uppercase; margin-top:2px; }
+
+  .nav-label{ font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:var(--slate-soft); font-weight:700; padding:14px 10px 8px; }
+  .nav-item{
+    display:flex; align-items:center; gap:11px; padding:9px 10px; border-radius:9px; color:var(--ink-soft);
+    cursor:pointer; font-size:13.3px; font-weight:500; position:relative; margin-bottom:2px; transition:background .15s ease, color .15s ease;
+  }
+  .nav-item svg{ flex:none; opacity:.85; }
+  .nav-item:hover{ background:var(--surface-sunk); color:var(--ink); }
+  .nav-item.active{ background:var(--brand-050); color:var(--brand-800); font-weight:600; }
+  .nav-item.active svg{ opacity:1; color: var(--brand-700); }
+  .nav-badge{ margin-left:auto; background:var(--amber-700); color:#fff; font-size:10.5px; font-weight:700; padding:1px 7px; border-radius:20px; font-family:'JetBrains Mono',monospace; }
+  .nav-divider{ height:1px; background:var(--line-soft); margin:14px 4px; }
+
+  .sidebar-foot{ margin-top:auto; padding-top:12px; }
+  .org-pill{ display:flex; align-items:center; gap:9px; padding:9px 10px; border-radius:10px; background:var(--surface-sunk); font-size:11.5px; }
+  .org-pill .dot{ width:7px; height:7px; border-radius:50%; background:var(--brand-500); flex:none; }
+  .org-pill .lab{ color:var(--slate); font-size:9.5px; text-transform:uppercase; letter-spacing:0.1em; }
+  .org-pill .val{ font-weight:600; color:var(--ink); }
+
+  .topbar{
+    height:64px; flex:none; display:flex; align-items:center; gap:14px; padding:0 26px; border-bottom:1px solid var(--line);
+    background:rgba(245,243,238,0.85); backdrop-filter:blur(8px); position:sticky; top:0; z-index:30;
+  }
+  .hamburger{ display:none; }
+  .org-switch{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; border:1px solid var(--line); background:var(--surface); cursor:pointer; }
+  .org-switch .ic{ width:26px; height:26px; border-radius:7px; background:var(--surface-sunk); display:flex; align-items:center; justify-content:center; }
+  .org-switch .lab{ font-size:9.5px; letter-spacing:0.1em; text-transform:uppercase; color:var(--slate); }
+  .org-switch .val{ font-size:13px; font-weight:600; }
+
+  .topbar-spacer{ flex:1; }
+  .role-wrap{ position:relative; }
+  .role-select{
+    display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:10px; cursor:pointer;
+    border:1.5px solid var(--brand-500); color:var(--brand-700); background:var(--brand-050); font-weight:700; font-size:12.5px;
+  }
+  .role-menu{
+    position:absolute; top:calc(100% + 8px); right:0; background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    box-shadow:var(--shadow-card); width:200px; padding:6px; display:none; z-index:50;
+  }
+  .role-menu.open{ display:block; }
+  .role-menu .opt{ padding:9px 10px; border-radius:8px; font-size:12.8px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; }
+  .role-menu .opt:hover{ background:var(--surface-sunk); }
+  .role-menu .opt.sel{ color:var(--brand-700); font-weight:700; }
+
+  .bell{ width:36px; height:36px; border-radius:10px; border:1px solid var(--line); background:var(--surface); display:flex; align-items:center; justify-content:center; position:relative; cursor:pointer; }
+  .bell .rd{ position:absolute; top:8px; right:8px; width:6px; height:6px; border-radius:50%; background:var(--amber-700); }
+  .avatar-row{ display:flex; align-items:center; gap:10px; padding-left:6px; }
+  .avatar{ width:34px; height:34px; border-radius:9px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; }
+  .avatar-name{ font-size:12.8px; font-weight:700; line-height:1.2; }
+  .avatar-role{ font-size:9.5px; color:var(--slate); text-transform:uppercase; letter-spacing:0.08em; }
+
+  .main{ flex:1; min-width:0; }
+  .page{ padding:30px 32px 60px; max-width:1360px; animation: rise .28s ease; }
+  @keyframes rise{ from{ opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);} }
+
+  .eyebrow-lab{ font-size:10.5px; letter-spacing:0.14em; text-transform:uppercase; color:var(--slate); font-weight:700; margin-bottom:6px; }
+  .page-head{ display:flex; align-items:flex-end; justify-content:space-between; gap:20px; margin-bottom:26px; flex-wrap:wrap; }
+  .page-head h1{ font-size:25px; color:var(--ink); margin-bottom:6px; }
+  .page-head .desc{ color:var(--slate); font-size:13px; max-width:560px; }
+  .head-actions{ display:flex; gap:10px; }
+
+  .grid{ display:grid; gap:18px; }
+  .cols-3{ grid-template-columns: repeat(3,1fr); }
+  .cols-2{ grid-template-columns: 2fr 1fr; }
+  @media (max-width: 980px){ .cols-3{ grid-template-columns:1fr 1fr; } .cols-2{ grid-template-columns:1fr; } }
+  @media (max-width: 680px){ .cols-3{ grid-template-columns:1fr; } }
+
+  .card{ background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-lg); padding:22px; box-shadow:var(--shadow-card); transition:box-shadow .25s var(--ease), border-color .25s var(--ease); }
+  .card.tight{ padding:16px 18px; }
+  .card:hover{ box-shadow:var(--shadow-card-hover); }
+  .card-hero{
+    background: linear-gradient(155deg, var(--brand-800) 0%, var(--brand-900) 65%, #082019 100%);
+    color:#fff; border:none; position:relative; overflow:hidden;
+  }
+  .card-hero::after{ content:''; position:absolute; right:-40px; bottom:-60px; width:220px; height:220px; border-radius:50%; background:radial-gradient(circle, rgba(255,255,255,0.10), transparent 70%); }
+  .card-hero::before{ content:''; position:absolute; inset:0; opacity:.5; background-image:linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px); background-size:34px 34px; mask-image:radial-gradient(circle at 85% 15%, black, transparent 70%); }
+  .card-hero > *{ position:relative; z-index:1; }
+  .stat-lab{ font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:var(--slate); font-weight:700; margin-bottom:12px; }
+  .card-hero .stat-lab{ color:#9FD3C1; }
+  .stat-num{ font-size:30px; font-weight:600; margin-bottom:6px; }
+  .stat-sub{ font-size:12px; color:var(--slate); }
+  .card-hero .stat-sub{ color:#B9DED2; }
+  .stat-num.amber{ color:var(--amber-700); }
+
+  .section-title{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+  .section-title h3{ font-size:16px; font-weight:600; }
+  .section-title .link{ font-size:12.5px; font-weight:700; color:var(--brand-600); cursor:pointer; }
+
+  .list-row{ display:flex; align-items:center; justify-content:space-between; padding:14px 0; border-bottom:1px solid var(--line-soft); gap:14px; }
+  .list-row:last-child{ border-bottom:none; padding-bottom:2px; }
+  .list-row .lname{ font-weight:600; font-size:13.6px; margin-bottom:3px; }
+  .list-row .lmeta{ font-size:11.8px; color:var(--slate); }
+  .list-row .lamt{ text-align:right; font-weight:700; font-size:13.8px; }
+  .list-row .lamt .sub{ font-weight:500; color:var(--slate); font-size:11px; margin-top:2px; }
+
+  .qa-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .qa-btn{ display:flex; flex-direction:column; align-items:flex-start; gap:16px; padding:14px; border-radius:12px; border:1px solid var(--line); background:var(--surface); cursor:pointer; font-weight:700; font-size:12.8px; color:var(--ink); text-align:left; transition:all .15s ease;}
+  .qa-btn:hover{ border-color:var(--brand-500); background:var(--brand-050); }
+  .qa-btn.dark{ background:var(--ink); color:#fff; border-color:var(--ink); }
+  .qa-btn .ic{ width:30px; height:30px; border-radius:8px; background:var(--surface-sunk); display:flex; align-items:center; justify-content:center; }
+  .qa-btn.dark .ic{ background:rgba(255,255,255,0.12); }
+
+  .progress-track{ height:8px; border-radius:20px; background:var(--surface-sunk); overflow:hidden; margin:10px 0; }
+  .progress-fill{ height:100%; border-radius:20px; background:linear-gradient(90deg, var(--brand-600), var(--brand-500)); transition:width .5s ease; }
+
+  /* ---------- charts ---------- */
+  .chart-card-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:6px; }
+  .chart-card-head h3{ font-size:15.5px; font-weight:600; margin-bottom:3px; }
+  .chart-card-head .chart-sub{ font-size:11.8px; color:var(--slate); }
+  .chart-total-pill{ text-align:right; flex:none; }
+  .chart-total-pill .v{ font-family:'JetBrains Mono',monospace; font-weight:700; font-size:16px; color:var(--ink); }
+  .chart-total-pill .l{ font-size:10.5px; color:var(--slate); text-transform:uppercase; letter-spacing:.08em; margin-top:1px; }
+
+  .donut-wrap{ position:relative; display:flex; align-items:center; justify-content:center; margin:6px auto 4px; }
+  .donut-center{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; }
+  .donut-center .v{ font-family:'JetBrains Mono',monospace; font-weight:700; font-size:19px; color:var(--ink); line-height:1.1; }
+  .donut-center .l{ font-size:9.8px; color:var(--slate); text-transform:uppercase; letter-spacing:.08em; margin-top:3px; }
+
+  .chart-legend{ display:flex; flex-direction:column; gap:9px; margin-top:14px; }
+  .chart-legend .lg-row{ display:flex; align-items:center; gap:9px; font-size:12.4px; }
+  .chart-legend .lg-row .dot{ width:8px; height:8px; border-radius:2.5px; flex:none; }
+  .chart-legend .lg-row .name{ flex:1; color:var(--ink-soft); font-weight:600; }
+  .chart-legend .lg-row .val{ font-family:'JetBrains Mono',monospace; font-weight:700; color:var(--ink); }
+  .chart-legend .lg-row .pct{ color:var(--slate); font-size:11px; width:34px; text-align:right; }
+
+  .chart-canvas-box{ position:relative; width:100%; }
+  .trend-toggle{ display:flex; gap:4px; background:var(--surface-sunk); border-radius:9px; padding:3px; }
+  .trend-toggle span{ padding:5px 10px; border-radius:7px; font-size:11.3px; font-weight:700; color:var(--slate); cursor:pointer; }
+  .trend-toggle span.on{ background:var(--surface); color:var(--brand-700); box-shadow:var(--shadow-xs); }
+
+  .bar-chart{
+    display:flex; align-items:flex-end; justify-content:space-between; gap:12px;
+    height:190px; margin-top:12px; padding:0 2px 2px;
+    background-image: repeating-linear-gradient(to top, var(--line-soft) 0, var(--line-soft) 1px, transparent 1px, transparent 25%);
+  }
+  .bar-group{ flex:1; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; gap:9px; }
+  .bar-pair{ display:flex; align-items:flex-end; gap:5px; height:100%; }
+  .bar{ width:15px; border-radius:5px 5px 2px 2px; transition:height .6s var(--ease); cursor:default; }
+  .bar.income{ background:linear-gradient(180deg, var(--chart-3), #6E97F5); }
+  .bar.outgoing{ background:linear-gradient(180deg, var(--chart-1), #12AE7A); }
+  .bar-group:hover .bar{ filter:brightness(1.08); }
+  .bar-label{ font-size:11px; font-weight:600; color:var(--slate); }
+
+  /* tables */
+  .table-wrap{ overflow-x:auto; }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  thead th{ text-align:left; font-size:10.3px; letter-spacing:0.09em; text-transform:uppercase; color:var(--slate); font-weight:700; padding:0 14px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  tbody td{ padding:15px 14px; border-bottom:1px solid var(--line-soft); vertical-align:middle; white-space:nowrap; }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr{ transition:background .12s ease; }
+  tbody tr.hoverable:hover{ background:var(--surface-sunk); }
+  .cell-strong{ font-weight:700; }
+  .cell-sub{ color:var(--slate); font-size:11.6px; margin-top:2px; }
+  .amt-neg{ color:var(--red-700); font-weight:700; }
+  .amt-pos{ color:var(--brand-700); font-weight:700; }
+
+  .badge{ display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; padding:4px 9px; border-radius:20px; }
+  .badge .d{ width:5px; height:5px; border-radius:50%; }
+  .badge-green{ background:var(--brand-050); color:var(--brand-700); } .badge-green .d{ background:var(--brand-500); }
+  .badge-amber{ background:var(--amber-100); color:var(--amber-700); } .badge-amber .d{ background:var(--amber-700); }
+  .badge-red{ background:var(--red-100); color:var(--red-700); } .badge-red .d{ background:var(--red-700); }
+  .badge-blue{ background:var(--blue-100); color:var(--blue-700); } .badge-blue .d{ background:var(--blue-700); }
+  .badge-gray{ background:var(--surface-sunk); color:var(--slate); } .badge-gray .d{ background:var(--slate-soft); }
+
+  .chip-row{ display:flex; gap:8px; flex-wrap:wrap; }
+  .chip{ padding:8px 13px; border-radius:9px; border:1px solid var(--line); background:var(--surface); font-size:12.5px; font-weight:600; cursor:pointer; color:var(--ink-soft); display:flex; gap:6px; align-items:center;}
+  .chip .n{ background:var(--surface-sunk); border-radius:6px; padding:0 5px; font-size:11px; font-family:'JetBrains Mono',monospace; }
+  .chip.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
+  .chip.active .n{ background:rgba(255,255,255,0.15); color:#fff; }
+
+  .search-box{ display:flex; align-items:center; gap:8px; padding:9px 12px; border-radius:10px; border:1px solid var(--line); background:var(--surface); min-width:230px; }
+  .search-box input{ border:none; outline:none; font-size:12.8px; width:100%; background:transparent; }
+  .search-box svg{ color:var(--slate-soft); flex:none; }
+
+  .toolbar{ display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
+
+  .link-strong{ color:var(--brand-700); font-weight:700; cursor:pointer; }
+  .link-muted{ color:var(--slate); cursor:pointer; font-weight:600; }
+  .link-muted:hover{ color:var(--ink); }
+  .row-actions{ display:flex; gap:14px; font-size:12.3px; font-weight:700; }
+
+  .empty-actions-note{ font-size:11px; color:var(--slate-soft); }
+
+  /* callout */
+  .callout{ display:flex; gap:14px; padding:16px 18px; border-radius:12px; background:var(--amber-100); border:1px solid #F1DDAE; margin-bottom:22px; }
+  .callout .ic{ width:30px; height:30px; border-radius:8px; background:#F5E3B8; color:var(--amber-700); display:flex; align-items:center; justify-content:center; flex:none; }
+  .callout h4{ font-family:'Inter'; font-size:13.3px; font-weight:700; margin-bottom:3px; }
+  .callout p{ font-size:12.2px; color:#7A5A17; }
+
+  /* toggle switch */
+  .toggle{ width:40px; height:23px; border-radius:20px; background:var(--surface-sunk); border:1px solid var(--line); position:relative; cursor:pointer; flex:none; transition:background .15s ease; }
+  .toggle .knob{ position:absolute; top:2px; left:2px; width:17px; height:17px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,0.25); transition:left .15s ease; }
+  .toggle.on{ background:var(--brand-700); border-color:var(--brand-700); }
+  .toggle.on .knob{ left:19px; }
+
+  /* forms */
+  .form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:640px){ .form-grid{ grid-template-columns:1fr; } }
+  .flabel{ font-size:10.8px; letter-spacing:0.08em; text-transform:uppercase; color:var(--ink-soft); font-weight:700; margin-bottom:7px; display:block; }
+  .finput, .fselect{ width:100%; padding:11px 13px; border-radius:9px; border:1.5px solid var(--line); background:var(--surface); font-size:13.3px; color:var(--ink); font-family:'JetBrains Mono', monospace; }
+  .finput:focus, .fselect:focus{ border-color:var(--brand-500); }
+  .finput.plain{ font-family:'Inter'; }
+
+  .settings-tabs{ display:flex; flex-direction:column; gap:2px; }
+  .settings-tab{ padding:11px 14px; border-radius:9px; font-size:13.2px; font-weight:600; color:var(--ink-soft); cursor:pointer; }
+  .settings-tab:hover{ background:var(--surface-sunk); }
+  .settings-tab.active{ background:var(--brand-050); color:var(--brand-800); font-weight:700; }
+
+  /* receipt (signature element) */
+  .receipt{ border:1px dashed var(--line); border-radius:12px; padding:16px 18px; background:var(--surface-sunk); }
+  .receipt-row{ display:flex; justify-content:space-between; font-size:13px; padding:7px 0; }
+  .receipt-row .k{ color:var(--slate); }
+  .receipt-row .v{ font-family:'JetBrains Mono',monospace; font-weight:600; }
+  .receipt-row.total{ border-top:1px dashed var(--line); margin-top:5px; padding-top:12px; }
+  .receipt-row.total .v{ font-size:16px; font-weight:700; color:var(--brand-800); }
+
+  .paymode-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:18px;}
+  .paymode{ border:1.5px solid var(--line); border-radius:11px; padding:14px; cursor:pointer; }
+  .paymode.sel{ border-color:var(--brand-600); background:var(--brand-050); }
+  .paymode .t{ font-weight:700; font-size:13.4px; margin-bottom:4px; }
+  .paymode .s{ font-size:11.6px; color:var(--slate); font-family:'JetBrains Mono',monospace;}
+
+  .batch-item{ padding:14px; border:1px solid var(--line); border-radius:11px; margin-bottom:10px; cursor:pointer; transition:all .12s ease; }
+  .batch-item:hover{ border-color:var(--brand-500); }
+  .batch-item.sel{ border-color:var(--brand-600); background:var(--brand-050); }
+  .batch-item .top{ display:flex; justify-content:space-between; margin-bottom:6px; }
+  .batch-item .nm{ font-weight:700; font-size:13.6px; }
+  .batch-item .meta{ font-size:11.5px; color:var(--slate); }
+  .batch-item .amt{ font-family:'JetBrains Mono',monospace; font-weight:700; }
+
+  .breakdown-mini{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:18px 0; }
+  .bd-box{ padding:14px; border-radius:11px; background:var(--surface-sunk); }
+  .bd-box.total{ background:var(--brand-050); }
+  .bd-box .l{ font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--slate); font-weight:700; margin-bottom:6px; }
+  .bd-box .v{ font-family:'JetBrains Mono',monospace; font-weight:700; font-size:15px; }
+  .bd-box.total .v{ color:var(--brand-800); }
+
+  .sample-table td, .sample-table th{ padding:11px 10px; }
+
+  /* toast */
+  #toast-host{ position:fixed; bottom:22px; right:22px; display:flex; flex-direction:column; gap:10px; z-index:200; }
+  .toast{ background:var(--ink); color:#fff; padding:13px 16px; border-radius:11px; font-size:12.8px; font-weight:600; display:flex; align-items:center; gap:10px; box-shadow:var(--shadow-pop); animation: toastIn .25s ease; min-width:220px; }
+  .toast .d{ width:8px; height:8px; border-radius:50%; background:var(--brand-500); flex:none; }
+  .toast.err .d{ background:#E4756A; }
+  @keyframes toastIn{ from{ opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
+
+  .drawer-overlay{ display:none; position:fixed; inset:0; background:rgba(15,20,17,0.35); z-index:35; }
+  .drawer-overlay.show{ display:block; }
+
+  @media (max-width: 900px){
+    .sidebar{ position:fixed; left:0; top:0; transform:translateX(-100%); transition:transform .22s ease; box-shadow:var(--shadow-pop); }
+    .sidebar.open{ transform:translateX(0); }
+    .hamburger{ display:flex; width:36px; height:36px; border-radius:9px; border:1px solid var(--line); background:var(--surface); align-items:center; justify-content:center; cursor:pointer; }
+    .org-switch .val{ display:none; }
+    .avatar-name, .avatar-role{ display:none; }
+    .page{ padding:22px 16px 50px; }
+    .cols-2{ grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="toast-host"></div>
+
+<script>
+/* ============================ ICONS ============================ */
+const ic = {
+  grid:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>`,
+  wallet:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a1 1 0 0 1 1 1v2"/><path d="M3 7v11a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1H5a2 2 0 0 1-2-2Z"/><circle cx="17" cy="14" r="1.6"/></svg>`,
+  users:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  repeat:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>`,
+  send:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>`,
+  shield:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>`,
+  userplus:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>`,
+  file:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z"/><path d="M14 2v6h6"/></svg>`,
+  bar:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12.5" y="8" width="3" height="10"/><rect x="18" y="5" width="3" height="13"/></svg>`,
+  plug:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 8V2M15 8V2"/><path d="M18 8v3a6 6 0 0 1-12 0V8Z"/></svg>`,
+  gear:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>`,
+  bell:`<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>`,
+  chevdown:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`,
+  search:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>`,
+  plus:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>`,
+  download:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>`,
+  upload:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>`,
+  arrowUp:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M7 7h10v10"/></svg>`,
+  card:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M2 10h20"/></svg>`,
+  building:`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v18"/><path d="M14 8h6a1 1 0 0 1 1 1v13"/><path d="M9 6h.01M9 10h.01M9 14h.01M9 18h.01"/></svg>`,
+  key:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65a1 1 0 0 1 1.41 0l1.59 1.59a1 1 0 0 1 0 1.41L18 11l2 2-2.5 2.5-2-2-1.65 1.65"/></svg>`,
+  check:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
+  x:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`,
+  menu:`<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>`,
+  alert:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4M12 17h.01"/></svg>`,
+  lock:`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`,
+  target:`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/></svg>`,
+};
+
+/* ============================ DATA ============================ */
+const roles = ['Individual','Corporate Admin','Superadmin','Corporate Maker','Corporate Checker','Corporate Viewer'];
+function isIndividual(){ return state.role === 'Individual'; }
+
+const payeesData = [
+  {name:'KPLC Prepaid', type:'Paybill', dest:'888880', ref:'44291039', category:'Utilities', status:'Active'},
+  {name:'Nairobi Water', type:'Paybill', dest:'400400', ref:'AC-1120', category:'Utilities', status:'Active'},
+  {name:'Little Stars School', type:'Paybill', dest:'512001', ref:'STU-2214', category:'Education', status:'Active'},
+  {name:'Java House HQ', type:'Till', dest:'5049921', ref:'—', category:'Meals', status:'Active'},
+  {name:'Mary Wanjiru (Nanny)', type:'Mobile', dest:'+254712334455', ref:'—', category:'Household', status:'Active'},
+  {name:'Equity — Payroll', type:'Bank', dest:'68 · 1450012987', ref:'PAYROLL-OCT', category:'Payroll', status:'Active'},
+  {name:'NCBA — Ops Reserve', type:'Bank', dest:'07 · 9820013340', ref:'—', category:'Treasury', status:'Inactive'},
+];
+
+const recurringData = [
+  {payee:'KPLC Prepaid', category:'Utilities', cadence:'Monthly', day:'day 5', next:'2026-07-05', base:9000, active:true, approval:false},
+  {payee:'Little Stars School', category:'Education', cadence:'Every 3 months', day:'day 10', next:'2026-07-10', base:45000, active:true, approval:true},
+  {payee:'Nairobi Water', category:'Utilities', cadence:'Monthly', day:'day 15', next:'2026-07-15', base:3200, active:true, approval:false},
+  {payee:'Mary Wanjiru (Nanny)', category:'Household', cadence:'Monthly', day:'day 1', next:'2026-08-01', base:22000, active:true, approval:false},
+  {payee:'Equity — Payroll', category:'Payroll', cadence:'Monthly', day:'day 28', next:'2026-07-28', base:850000, active:true, approval:true},
+  {payee:'Java House Corporate Tab', category:'Meals', cadence:'Monthly', day:'day 30', next:'2026-07-30', base:12400, active:false, approval:false},
+];
+
+const ledgerData = [
+  {date:'2026-07-04',time:'09:15', ref:'TXN-99201', desc:'KPLC Prepaid', sub:'Paybill 888880', category:'Utilities', base:5000, fee:100, status:'Succeeded'},
+  {date:'2026-07-03',time:'14:20', ref:'TXN-99188', desc:'Bulk Staff Payout', sub:'M-Pesa Batch 004', category:'Payroll', base:450000, fee:9000, status:'Succeeded'},
+  {date:'2026-07-03',time:'11:05', ref:'TXN-99150', desc:'Nairobi Water', sub:'Paybill 400400', category:'Utilities', base:12400, fee:248, status:'Processing'},
+  {date:'2026-07-02',time:'16:40', ref:'TXN-99120', desc:'Java House HQ', sub:'Till 5049921', category:'Meals', base:3400, fee:68, status:'Succeeded'},
+  {date:'2026-07-01',time:'10:02', ref:'TXN-99090', desc:'Office Rent (HQ)', sub:'Bank NCBA 07', category:'Rent', base:88400, fee:1768, status:'Approved'},
+  {date:'2026-06-30',time:'18:22', ref:'TXN-99055', desc:'Mary Wanjiru', sub:'M-Pesa +254712', category:'Household', base:22000, fee:440, status:'Succeeded'},
+];
+
+const batchesData = [
+  {name:'Payroll — October', items:42, total:1220000, status:'Pending approval', date:'2026-07-28', by:'Sarah M.'},
+  {name:'Supplier Payouts — Q3 W1', items:18, total:496200, status:'Pending approval', date:'2026-07-08', by:'David K.'},
+  {name:'Office Rent (HQ)', items:3, total:88400, status:'Approved', date:'2026-07-01', by:'Sarah M.'},
+  {name:'Marketing Vendor Batch', items:7, total:135000, status:'Processing', date:'2026-06-28', by:'Aisha N.'},
+];
+
+let approvalsQueue = [
+  {id:1, name:'Payroll — October', items:42, by:'Sarah M.', runDate:'2026-07-28', base:1200000, fee:24000,
+   sample:[
+     {recipient:'Employee #001 — Grace W.', channel:'MPESA +254 712 …', amount:32500},
+     {recipient:'Employee #002 — Peter O.', channel:'MPESA +254 707 …', amount:41000},
+     {recipient:'Employee #003 — Faith K.', channel:'Bank Equity 68·…', amount:55250},
+     {recipient:'Employee #004 — John M.', channel:'MPESA +254 733 …', amount:28900},
+   ]},
+  {id:2, name:'Supplier Payouts — Q3 W1', items:18, by:'David K.', runDate:'2026-07-08', base:486470, fee:9729,
+   sample:[
+     {recipient:'Acme Packaging Ltd', channel:'Bank NCBA 07·…', amount:120000},
+     {recipient:'Fresh Farms Co.', channel:'MPESA +254 720 …', amount:64500},
+     {recipient:'Blue Sky Logistics', channel:'Bank Equity 68·…', amount:98200},
+   ]},
+];
+
+const membersData = [
+  {initials:'JK', color:'#161C19', name:'J. Kamau', email:'j.kamau@solaris.co.ke', phone:'+254 712 000 441', role:'Corporate Admin', active:'2 min ago', status:'Active'},
+  {initials:'SM', color:'#125E4C', name:'Sarah Muthoni', email:'sarah.m@solaris.co.ke', phone:'+254 720 118 002', role:'Corporate Maker', active:'1 hr ago', status:'Active'},
+  {initials:'DK', color:'#385A9C', name:'David Kiptoo', email:'david.k@solaris.co.ke', phone:'+254 733 442 019', role:'Corporate Maker', active:'Today, 08:22', status:'Active'},
+  {initials:'AN', color:'#9C6417', name:'Aisha Njeri', email:'aisha.n@solaris.co.ke', phone:'+254 701 552 883', role:'Corporate Checker', active:'Yesterday', status:'Active'},
+  {initials:'PO', color:'#7B837E', name:'Peter Otieno', email:'peter.o@solaris.co.ke', phone:'+254 707 993 001', role:'Corporate Viewer', active:'12 days ago', status:'Inactive'},
+];
+
+const apiKeysData = [
+  {label:'Production — Payroll ETL', key:'qb_live_a91f…', scope:'payments:write, batches:write', created:'2026-04-12', lastUsed:'3 min ago', status:'Active'},
+  {label:'Sandbox — Reconciliation', key:'qb_test_5c22…', scope:'payments:read, statements:read', created:'2026-05-01', lastUsed:'2 hrs ago', status:'Active'},
+  {label:'Legacy Ops Script', key:'qb_live_11ab…', scope:'payments:read', created:'2025-11-08', lastUsed:'42 days ago', status:'Revoked'},
+];
+
+const exportsData = [
+  {name:'Transactions — July 2026', meta:'CSV · requested by J. Kamau · 2 hrs ago', status:'Ready'},
+  {name:'Payroll batch #1029', meta:'CSV · requested by Sarah M. · yesterday', status:'Ready'},
+  {name:'Vendor payouts — Q2 2026', meta:'CSV · requested by Aisha N. · Jun 30', status:'Expired'},
+];
+
+const categoryBreakdown = [
+  {label:'Payroll', value:1258000, color:'var(--chart-1)'},
+  {label:'Utilities', value:98400, color:'var(--chart-2)'},
+  {label:'Rent', value:88400, color:'var(--chart-3)'},
+  {label:'Education', value:45900, color:'var(--chart-4)'},
+  {label:'Meals & household', value:37800, color:'var(--chart-5)'},
+];
+
+const monthlyTrend = [
+  {m:'Feb', spend:1120000, income:1300000},
+  {m:'Mar', spend:1240000, income:1300000},
+  {m:'Apr', spend:1180000, income:1350000},
+  {m:'May', spend:1310000, income:1350000},
+  {m:'Jun', spend:1275000, income:1400000},
+  {m:'Jul', spend:1528500, income:1400000},
+];
+
+/* ============================ STATE ============================ */
+const state = {
+  stage:'login', // login -> otp -> app
+  phone:'+254 712 000 441',
+  password:'',
+  otp:['','','','','',''],
+  page:'dashboard',
+  role:'Corporate Admin',
+  roleMenuOpen:false,
+  sidebarOpen:false,
+  payeeFilter:'All',
+  payeeSearch:'',
+  settingsTab:'Profile',
+  quickPayAmount:9000,
+  quickPayMode:'Wallet',
+  selectedBatch: batchesData[0],
+  selectedApproval: approvalsQueue[0] ? approvalsQueue[0].id : null,
+};
+
+/* ============================ HELPERS ============================ */
+function money(n){
+  return Number(n).toLocaleString('en-KE', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function el(html){ const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
+function toast(msg, kind){
+  const host = document.getElementById('toast-host');
+  const node = el(`<div class="toast ${kind==='err'?'err':''}"><span class="d"></span>${msg}</div>`);
+  host.appendChild(node);
+  setTimeout(()=>{ node.style.transition='opacity .25s ease'; node.style.opacity='0'; setTimeout(()=>node.remove(),250); }, 2600);
+}
+function badge(status){
+  const map = {
+    'Active':'green','Succeeded':'green','Approved':'green','Ready':'green',
+    'Pending approval':'amber','Processing':'blue',
+    'Revoked':'red','Inactive':'gray','Expired':'gray'
+  };
+  const cls = map[status] || 'gray';
+  return `<span class="badge badge-${cls}"><span class="d"></span>${status}</span>`;
+}
+
+/* ============================ RENDER ROOT ============================ */
+function render(){
+  const root = document.getElementById('root');
+  if(state.stage === 'login'){ root.innerHTML = renderLogin(); bindLogin(); return; }
+  if(state.stage === 'otp'){ root.innerHTML = renderOtp(); bindOtp(); return; }
+  root.innerHTML = renderApp();
+  bindApp();
+}
+
+/* ============================ CHARTS (dependency-free: pure SVG + CSS) ============================ */
+function donutSVG(data){
+  const total = data.reduce((s,d)=>s+d.value,0);
+  const r = 15.9155; // circumference ≈ 100, classic 0-100 donut trick
+  let acc = 0;
+  const segs = data.map(d=>{
+    const pct = (d.value/total*100);
+    const dash = `${Math.max(pct-1.4,0.001)} ${100-Math.max(pct-1.4,0.001)}`;
+    const rotate = (acc/100*360) - 90;
+    acc += pct;
+    return `<circle cx="18" cy="18" r="${r}" fill="none" style="stroke:${d.color}" stroke-width="4.6" stroke-linecap="round" stroke-dasharray="${dash}" transform="rotate(${rotate} 18 18)"/>`;
+  }).join('');
+  return `<svg viewBox="0 0 36 36" width="180" height="180" style="display:block;">
+    <circle cx="18" cy="18" r="${r}" fill="none" style="stroke:var(--chart-track)" stroke-width="4.6"/>
+    ${segs}
+  </svg>`;
+}
+
+function barChartHTML(data){
+  const max = Math.max(...data.flatMap(d=>[d.income,d.spend])) * 1.1;
+  return `
+  <div class="bar-chart">
+    ${data.map(d=>{
+      const hIncome = (d.income/max*100).toFixed(1);
+      const hSpend = (d.spend/max*100).toFixed(1);
+      return `
+      <div class="bar-group">
+        <div class="bar-pair">
+          <div class="bar income" style="height:${hIncome}%" title="Income · KES ${money(d.income)}"></div>
+          <div class="bar outgoing" style="height:${hSpend}%" title="Outgoing · KES ${money(d.spend)}"></div>
+        </div>
+        <div class="bar-label">${d.m}</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+/* ============================ AUTH SCREENS ============================ */
+function authSide(){
+  return `
+  <div class="auth-side">
+    <div>
+      <div class="eyebrow">Controlled money movement</div>
+      <h2>Every payout, approval, and fee — visible, auditable, and yours to control.</h2>
+    </div>
+    <div>
+      <div class="side-card">
+        <div class="ic">${ic.shield}</div>
+        <h4>Maker · Checker approvals</h4>
+        <p>Payouts wait for explicit clearance. Approvers see base amount, fee, and total debit before acting.</p>
+      </div>
+      <div class="side-card">
+        <div class="ic">${ic.lock}</div>
+        <h4>OTP-verified sessions</h4>
+        <p>Bearer-token sessions with a device-scoped code required for every sensitive action.</p>
+      </div>
+      <div class="trust-line" style="margin-top:22px;">Trusted by teams moving KES 4.2B+ monthly across bill, payroll, and supplier settlements.</div>
+    </div>
+  </div>`;
+}
+
+function renderLogin(){
+  return `
+  <div class="auth-wrap">
+    <div class="auth-form">
+      <div class="auth-brand">
+        <div class="mark">QB</div>
+        <div><div class="name">Quick Bundl</div><div class="sub">Payments OS</div></div>
+      </div>
+      <div class="auth-body">
+        <div class="step-tag">Step 1 of 2 <span class="dot-sep">·</span> Credentials</div>
+        <h1>Sign in to your account</h1>
+        <div class="desc">Enter your registered phone number and password.</div>
+
+        <div class="field">
+          <label>Phone number</label>
+          <input id="in-phone" type="text" value="${state.phone}" />
+        </div>
+        <div class="field">
+          <label>Password <a id="forgot">Forgot?</a></label>
+          <input id="in-pass" type="password" value="qbundl2026" />
+        </div>
+        <button class="btn btn-primary" id="btn-continue">Continue to verification ${ic.arrowUp}</button>
+        <div style="text-align:center; margin-top:18px; font-size:12.8px; color:var(--slate);">
+          New to Quick Bundl? <a class="link-strong" id="register">Register an organization</a>
+        </div>
+      </div>
+      <div class="auth-foot">
+        <div><a href="#">© 2026 Quick Bundl</a><a href="#">Terms</a><a href="#">Privacy</a></div>
+        <div class="status-chip"><span class="pulse"></span>Status: operational</div>
+      </div>
+    </div>
+    ${authSide()}
+  </div>`;
+}
+
+function bindLogin(){
+  document.getElementById('btn-continue').addEventListener('click', ()=>{
+    state.phone = document.getElementById('in-phone').value || state.phone;
+    state.stage = 'otp';
+    render();
+  });
+  document.getElementById('register')?.addEventListener('click', (e)=>{ e.preventDefault(); toast('Organization registration is invite-only in this preview.'); });
+  document.getElementById('forgot')?.addEventListener('click', (e)=>{ e.preventDefault(); toast('Password reset link sent to your registered contact.'); });
+}
+
+function renderOtp(){
+  return `
+  <div class="auth-wrap">
+    <div class="auth-form">
+      <div class="auth-brand">
+        <div class="mark">QB</div>
+        <div><div class="name">Quick Bundl</div><div class="sub">Payments OS</div></div>
+      </div>
+      <div class="auth-body">
+        <div class="step-tag">Step 2 of 2 <span class="dot-sep">·</span> Verification</div>
+        <h1>Enter your access code</h1>
+        <div class="desc">We sent a 6-digit code to ${state.phone}.</div>
+        <div class="otp-row">
+          ${[0,1,2,3,4,5].map(i=>`<input class="otp-box" maxlength="1" inputmode="numeric" data-i="${i}" value="${state.otp[i]}"/>`).join('')}
+        </div>
+        <div class="otp-meta"><span id="otp-timer">Code expires in 0:59</span><a class="link-strong" id="resend">Resend code</a></div>
+        <button class="btn btn-primary" id="btn-verify">Verify and sign in</button>
+        <div style="text-align:center; margin-top:18px;"><a class="link-muted" id="back-login">Use a different phone number</a></div>
+      </div>
+      <div class="auth-foot">
+        <div><a href="#">© 2026 Quick Bundl</a><a href="#">Terms</a><a href="#">Privacy</a></div>
+        <div class="status-chip"><span class="pulse"></span>Status: operational</div>
+      </div>
+    </div>
+    ${authSide()}
+  </div>`;
+}
+
+function bindOtp(){
+  const boxes = Array.from(document.querySelectorAll('.otp-box'));
+  boxes.forEach((box, idx)=>{
+    box.addEventListener('input', (e)=>{
+      const v = e.target.value.replace(/[^0-9]/g,'').slice(-1);
+      e.target.value = v;
+      state.otp[idx] = v;
+      if(v && boxes[idx+1]) boxes[idx+1].focus();
+    });
+    box.addEventListener('keydown', (e)=>{
+      if(e.key==='Backspace' && !e.target.value && boxes[idx-1]){ boxes[idx-1].focus(); }
+    });
+  });
+  document.getElementById('btn-verify').addEventListener('click', ()=>{
+    state.stage = 'app';
+    state.page = 'dashboard';
+    render();
+    setTimeout(()=>toast('Welcome back, J. Kamau'), 350);
+  });
+  document.getElementById('back-login').addEventListener('click', (e)=>{ e.preventDefault(); state.stage='login'; render(); });
+  document.getElementById('resend').addEventListener('click', (e)=>{ e.preventDefault(); toast('New code sent.'); });
+}
+
+/* ============================ APP SHELL ============================ */
+const navSections = [
+  {label:'Operations', items:[
+    {id:'dashboard', label:'Dashboard', icon:ic.grid},
+    {id:'wallets', label:'Wallets', icon:ic.wallet},
+    {id:'payees', label:'Payees', icon:ic.users},
+    {id:'recurring', label:'Recurring', icon:ic.repeat},
+    {id:'payments', label:'Payments', icon:ic.send},
+    {id:'approvals', label:'Approvals', icon:ic.shield, orgOnly:true, badge: ()=>approvalsQueue.length || null},
+  ]},
+  {label:'Administration', items:[
+    {id:'members', label:'Members', icon:ic.userplus, orgOnly:true},
+    {id:'statements', label:'Statements', icon:ic.file},
+    {id:'reports', label:'Reports', icon:ic.bar},
+    {id:'integrations', label:'Integrations', icon:ic.plug, orgOnly:true},
+  ]},
+];
+function navSectionsForRole(){
+  // An Individual has no team, no maker/checker workflow, and no org-level API access —
+  // those nav items only make sense once there's an organization behind the account.
+  return navSections
+    .map(sec=>({...sec, items: sec.items.filter(it=> !(isIndividual() && it.orgOnly)) }))
+    .filter(sec=> sec.items.length>0);
+}
+
+function renderApp(){
+  return `
+  <div class="drawer-overlay ${state.sidebarOpen?'show':''}" id="overlay"></div>
+  <div class="shell">
+    <aside class="sidebar ${state.sidebarOpen?'open':''}" id="sidebar">
+      <div class="brand-row">
+        <div class="mark">QB</div>
+        <div><div class="name">Quick Bundl</div><div class="sub">Payments OS</div></div>
+      </div>
+      <nav style="overflow-y:auto; flex:1;">
+        ${navSectionsForRole().map(sec=>`
+          <div class="nav-label">${sec.label}</div>
+          ${sec.items.map(it=>`
+            <div class="nav-item ${state.page===it.id?'active':''}" data-page="${it.id}">
+              ${it.icon}<span>${it.label}</span>
+              ${it.badge && it.badge() ? `<span class="nav-badge">${it.badge()}</span>`:''}
+            </div>`).join('')}
+        `).join('')}
+      </nav>
+      <div class="sidebar-foot">
+        <div class="nav-item ${state.page==='settings'?'active':''}" data-page="settings">${ic.gear}<span>Settings</span></div>
+        <div class="org-pill" style="margin-top:8px;">
+          <span class="dot"></span>
+          ${isIndividual()
+            ? `<div><div class="lab">Account type</div><div class="val">Individual · no organization</div></div>`
+            : `<div><div class="lab">Active org</div><div class="val">Personal Account</div></div>`}
+        </div>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="hamburger" id="hamburger">${ic.menu}</div>
+        ${isIndividual()
+          ? `<div class="org-switch" style="cursor:default;"><div class="ic">${ic.wallet}</div><div><div class="lab">Account</div><div class="val">Individual</div></div></div>`
+          : `<div class="org-switch">
+          <div class="ic">${ic.building}</div>
+          <div><div class="lab">Organization</div><div class="val">Personal Account</div></div>
+          ${ic.chevdown}
+        </div>`}
+        <div class="topbar-spacer"></div>
+        <div style="font-size:9.5px; letter-spacing:0.1em; text-transform:uppercase; color:var(--slate); text-align:right; margin-right:-6px;">Preview role</div>
+        <div class="role-wrap">
+          <div class="role-select" id="role-select">${state.role}${ic.chevdown}</div>
+          <div class="role-menu ${state.roleMenuOpen?'open':''}" id="role-menu">
+            ${roles.map(r=>`<div class="opt ${r===state.role?'sel':''}" data-role="${r}">${r} ${r===state.role?ic.check:''}</div>`).join('')}
+          </div>
+        </div>
+        <div class="bell">${ic.bell}<span class="rd"></span></div>
+        <div class="avatar-row">
+          <div class="avatar">JK</div>
+          <div><div class="avatar-name">J. Kamau</div><div class="avatar-role">${state.role}</div></div>
+        </div>
+      </header>
+      <main class="page" id="page-content">
+        ${renderPage()}
+      </main>
+    </div>
+  </div>`;
+}
+
+function renderPage(){
+  switch(state.page){
+    case 'dashboard': return pageDashboard();
+    case 'wallets': return pageWallets();
+    case 'payees': return pagePayees();
+    case 'recurring': return pageRecurring();
+    case 'payments': return pagePayments();
+    case 'approvals': return pageApprovals();
+    case 'members': return pageMembers();
+    case 'statements': return pageStatements();
+    case 'reports': return pageReports();
+    case 'integrations': return pageIntegrations();
+    case 'settings': return pageSettings();
+    default: return pageDashboard();
+  }
+}
+
+/* ============================ PAGES ============================ */
+function pageDashboard(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Personal overview</div>
+      <h1>Welcome back, Jane</h1>
+      <div class="desc">Your bills, your vault, your schedule. A 2% fee applies per outgoing transaction.</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn-ghost" data-page="wallets">${ic.card} Top up</button>
+      <button class="btn btn-dark" data-page="payments">${ic.arrowUp} Pay now</button>
+    </div>
+  </div>
+
+  <div class="grid cols-3" style="margin-bottom:18px;">
+    <div class="card card-hero">
+      <div class="stat-lab">Wallet balance</div>
+      <div class="stat-num num">32,540.00</div>
+      <div class="stat-sub">KES · available for payments</div>
+    </div>
+    <div class="card">
+      <div class="stat-lab">Vault savings</div>
+      <div class="stat-num num" style="color:var(--brand-700)">120,000.00</div>
+      <div class="stat-sub">KES · locked reserve</div>
+    </div>
+    <div class="card">
+      <div class="stat-lab">Funding shortfall</div>
+      <div class="stat-num num amber">KES 25.8K</div>
+      <div class="stat-sub">Top up to cover due bills</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div>
+      <div class="card" style="margin-bottom:18px;">
+        <div class="section-title">
+          <h3>Due this month</h3>
+          <span class="link" data-page="recurring">Manage</span>
+        </div>
+        <div class="stat-sub" style="margin-bottom:8px;">3 schedules · total debit KES 58.3K</div>
+        ${[
+          {n:'KPLC Prepaid', m:'Utilities · due 2026-07-05 · every 1mo', a:9180, s:'base 9000 + fee 180'},
+          {n:'Little Stars School', m:'Education · due 2026-07-10 · every 3mo', a:45900, s:'base 45000 + fee 900'},
+          {n:'Nairobi Water', m:'Utilities · due 2026-07-15 · every 1mo', a:3264, s:'base 3200 + fee 64'},
+        ].map(r=>`
+          <div class="list-row">
+            <div><div class="lname">${r.n}</div><div class="lmeta">${r.m}</div></div>
+            <div class="lamt num">KES ${money(r.a)}<div class="sub">${r.s}</div></div>
+          </div>`).join('')}
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          <h3>Recent transactions</h3>
+          <span class="link" data-page="statements">See all</span>
+        </div>
+        ${ledgerData.slice(0,3).map(t=>`
+          <div class="list-row">
+            <div><div class="lname">${t.desc}</div><div class="lmeta">${t.sub}</div></div>
+            <div class="lamt num" style="color:var(--red-700)">− KES ${money(t.base+t.fee)}<div class="sub" style="color:var(--slate)">${badge(t.status)}</div></div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:18px;">
+        <h3 style="font-size:16px; margin-bottom:14px;">Quick actions</h3>
+        <div class="qa-grid">
+          <div class="qa-btn" data-page="wallets"><div class="ic">${ic.card}</div>Top up</div>
+          <div class="qa-btn dark" data-page="payments"><div class="ic">${ic.arrowUp}</div>Pay now</div>
+          <div class="qa-btn" data-page="payees"><div class="ic">${ic.plus}</div>Add payee</div>
+          <div class="qa-btn" data-page="recurring"><div class="ic">${ic.plus}</div>New schedule</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="font-size:16px; margin-bottom:4px;">Vault progress</h3>
+        <div class="stat-sub" style="margin-bottom:2px;">Target KES 500,000</div>
+        <div class="progress-track"><div class="progress-fill" style="width:24%"></div></div>
+        <div style="display:flex; justify-content:space-between; font-size:12.8px; margin-bottom:6px;">
+          <span style="font-weight:700;">Saved</span><span class="num" style="font-weight:700; color:var(--brand-700);">24%</span>
+        </div>
+        <div class="stat-sub">Moving KES 15,000 monthly hits target by December 2027.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid cols-2" style="margin-top:18px;">
+    <div class="card">
+      <div class="chart-card-head">
+        <div><h3>Spending by category</h3><div class="chart-sub">Last 30 days · across all channels</div></div>
+      </div>
+      <div class="donut-wrap" style="width:180px; height:180px;">
+        ${donutSVG(categoryBreakdown)}
+        <div class="donut-center">
+          <div class="v num">KES 1.53M</div>
+          <div class="l">Total spend</div>
+        </div>
+      </div>
+      <div class="chart-legend">
+        ${categoryBreakdown.map(c=>{
+          const total = categoryBreakdown.reduce((s,x)=>s+x.value,0);
+          const pct = Math.round(c.value/total*100);
+          return `<div class="lg-row"><span class="dot" style="background:${c.color}"></span><span class="name">${c.label}</span><span class="val">${money(c.value)}</span><span class="pct">${pct}%</span></div>`;
+        }).join('')}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="chart-card-head">
+        <div><h3>Cash flow, last 6 months</h3><div class="chart-sub">Income vs. total outgoing, KES</div></div>
+        <div class="chart-total-pill"><div class="v">+${money(monthlyTrend[monthlyTrend.length-1].income - monthlyTrend[monthlyTrend.length-1].spend)}</div><div class="l">Net · Jul</div></div>
+      </div>
+      ${barChartHTML(monthlyTrend)}
+      <div style="display:flex; gap:18px; margin-top:14px; font-size:12px; color:var(--slate);">
+        <span style="display:flex; align-items:center; gap:6px;"><span class="dot" style="width:8px; height:8px; border-radius:2.5px; background:var(--chart-3); display:inline-block;"></span>Income</span>
+        <span style="display:flex; align-items:center; gap:6px;"><span class="dot" style="width:8px; height:8px; border-radius:2.5px; background:var(--chart-1); display:inline-block;"></span>Outgoing</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+function pageWallets(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Wallets & vault</div>
+      <h1>Balances and ledger</h1>
+      <div class="desc">Personal Account · every debit shows base amount, 2% fee, and total.</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn-ghost">${ic.arrowUp} Withdraw</button>
+      <button class="btn btn-dark">${ic.download} Top up</button>
+    </div>
+  </div>
+
+  <div class="grid cols-2" style="margin-bottom:18px;">
+    <div class="card card-hero">
+      <div class="stat-lab">Primary wallet</div>
+      <div class="stat-num num" style="font-size:32px;">KES 32,540.00</div>
+      <div class="stat-sub">Operational funds for payouts</div>
+    </div>
+    <div class="card">
+      <div class="stat-lab">Vault reserve</div>
+      <div class="stat-num num" style="font-size:32px; color:var(--brand-700);">KES 120,000.00</div>
+      <div class="stat-sub">Locked savings · 6.2% p.a.</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <div class="section-title"><h3>Ledger movements</h3><span class="stat-sub">Showing ${ledgerData.length} of 1,204</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Date · Ref</th><th>Description</th><th>Base</th><th>Fee</th><th>Amount</th><th>Status</th></tr></thead>
+          <tbody>
+            ${ledgerData.map(t=>`
+              <tr class="hoverable">
+                <td><div class="cell-strong">${t.date}</div><div class="cell-sub">${t.ref}</div></td>
+                <td><div class="cell-strong">${t.desc}</div><div class="cell-sub">${t.sub}</div></td>
+                <td class="num">${money(t.base)}</td>
+                <td class="num">${money(t.fee)}</td>
+                <td class="num amt-neg">− ${money(t.base+t.fee)}</td>
+                <td>${badge(t.status)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:14px;">Move funds</h3>
+      <div class="qa-btn" style="margin-bottom:10px; flex-direction:row; align-items:center;" data-toast="Top up flow would open here.">
+        <div class="ic">${ic.download}</div><div><div>Top up wallet</div><div class="cell-sub" style="font-weight:500;">M-Pesa · Bank · Card</div></div>
+      </div>
+      <div class="qa-btn" style="margin-bottom:10px; flex-direction:row; align-items:center;" data-toast="KES 15,000 queued to transfer to vault.">
+        <div class="ic">🐷</div><div><div>Transfer to vault</div><div class="cell-sub" style="font-weight:500;">Move idle cash to reserve</div></div>
+      </div>
+      <div class="qa-btn" style="flex-direction:row; align-items:center;" data-toast="${isIndividual() ? 'KES withdrawal to M-Pesa queued for processing.' : 'Withdrawals route through the maker · checker queue.'}">
+        <div class="ic">${ic.arrowUp}</div><div><div>Withdraw to M-Pesa</div><div class="cell-sub" style="font-weight:500;">${isIndividual() ? 'Instant · no approval needed' : 'Requires approval'}</div></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function pagePayees(){
+  const cats = ['All','Paybill','Till','Mobile','Bank'];
+  const counts = {All:payeesData.length};
+  ['Paybill','Till','Mobile','Bank'].forEach(c=> counts[c]=payeesData.filter(p=>p.type===c).length);
+  const filtered = payeesData.filter(p=>{
+    const matchType = state.payeeFilter==='All' || p.type===state.payeeFilter;
+    const q = state.payeeSearch.toLowerCase();
+    const matchSearch = !q || p.name.toLowerCase().includes(q) || p.ref.toLowerCase().includes(q);
+    return matchType && matchSearch;
+  });
+  const typeIcon = {Paybill:'🏢', Till:'🏪', Mobile:'📱', Bank:'🏦'};
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Directory</div>
+      <h1>Payees</h1>
+      <div class="desc">Saved destinations for bills, payouts, and recurring payments.</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn-ghost">Add from preset</button>
+      <button class="btn btn-dark">${ic.plus} New payee</button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="chip-row">
+      ${cats.map(c=>`<div class="chip ${state.payeeFilter===c?'active':''}" data-filter="${c}">${c}<span class="n">${counts[c]}</span></div>`).join('')}
+    </div>
+    <div class="search-box">${ic.search}<input id="payee-search" placeholder="Search payees, references…" value="${state.payeeSearch}"/></div>
+  </div>
+
+  <div class="card" style="padding:0; overflow:hidden;">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Payee</th><th>Type</th><th>Destination</th><th>Reference</th><th>Category</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${filtered.length ? filtered.map(p=>`
+            <tr class="hoverable">
+              <td class="cell-strong">${p.name}</td>
+              <td>${typeIcon[p.type]} ${p.type}</td>
+              <td class="num">${p.dest}</td>
+              <td class="num">${p.ref}</td>
+              <td>${p.category}</td>
+              <td>${badge(p.status)}</td>
+              <td><div class="row-actions"><span class="link-strong" data-toast="Opening quick pay for ${p.name}.">Pay</span><span class="link-muted" data-toast="Editing ${p.name}.">Edit</span></div></td>
+            </tr>`).join('') : `<tr><td colspan="7" style="text-align:center; color:var(--slate); padding:30px;">No payees match your filters.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function pageRecurring(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Schedules</div>
+      <h1>Recurring payments</h1>
+      <div class="desc">${isIndividual() ? 'Auto-run your bills and personal payouts on schedule.' : 'Auto-run bills and payouts. Schedules that need approval wait for a checker before executing.'}</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn-ghost">📅 Calendar view</button>
+      <button class="btn btn-dark">${ic.plus} New schedule</button>
+    </div>
+  </div>
+
+  <div class="card" style="padding:0;">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Payee · Category</th><th>Cadence</th><th>Next due</th><th>Base</th><th>Fee (2%)</th><th>Total debit</th><th>Status</th><th>Active</th></tr></thead>
+        <tbody>
+          ${recurringData.map((r,i)=>`
+            <tr class="hoverable">
+              <td><div class="cell-strong">${r.payee}</div><div class="cell-sub">${r.category}</div></td>
+              <td><div class="cell-strong">${r.cadence}</div><div class="cell-sub">${r.day}</div></td>
+              <td class="num">${r.next}</td>
+              <td class="num">${money(r.base)}</td>
+              <td class="num">${money(r.base*0.02)}</td>
+              <td class="num cell-strong">KES ${money(r.base*1.02)}</td>
+              <td>${badge(r.active?'Active':'Inactive')}${(r.approval && !isIndividual())?`<div class="cell-sub" style="color:var(--amber-700); margin-top:4px; font-weight:700;">Approval required</div>`:''}</td>
+              <td><div class="toggle ${r.active?'on':''}" data-toggle-recurring="${i}"><span class="knob"></span></div></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function pagePayments(){
+  const base = Number(state.quickPayAmount)||0;
+  const fee = base*0.02;
+  const total = base+fee;
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Payments</div>
+      <h1>Send money, review outcomes</h1>
+      <div class="desc">Ad-hoc payments, batch uploads, and instruction-level results in one place.</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn-ghost">${ic.upload} Upload batch</button>
+      <button class="btn btn-dark">${ic.plus} New payment</button>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:4px;">Quick pay</h3>
+      <div class="desc" style="margin-bottom:18px;">Payee, amount, mode. Review before sending.</div>
+
+      <div class="field" style="margin-bottom:16px;">
+        <label style="text-transform:uppercase; letter-spacing:0.08em; font-size:10.8px; color:var(--ink-soft);">Payee</label>
+        <input class="finput" value="KPLC Prepaid — Paybill 888880" readonly/>
+      </div>
+      <div class="field" style="margin-bottom:16px;">
+        <label style="text-transform:uppercase; letter-spacing:0.08em; font-size:10.8px; color:var(--ink-soft);">Amount (KES)</label>
+        <input class="finput" id="qp-amount" type="number" value="${base}"/>
+      </div>
+
+      <label style="text-transform:uppercase; letter-spacing:0.08em; font-size:10.8px; color:var(--ink-soft); font-weight:700; display:block; margin-bottom:8px;">Payment mode</label>
+      <div class="paymode-grid">
+        <div class="paymode ${state.quickPayMode==='Wallet'?'sel':''}" data-mode="Wallet"><div class="t">Wallet</div><div class="s">KES 32,540.00</div></div>
+        <div class="paymode ${state.quickPayMode==='STK'?'sel':''}" data-mode="STK"><div class="t">STK push</div><div class="s">Instant · +254 712</div></div>
+      </div>
+
+      <div class="receipt">
+        <div class="receipt-row"><span class="k">Base amount</span><span class="v num">${money(base)}</span></div>
+        <div class="receipt-row"><span class="k">Processing fee (2%)</span><span class="v num">${money(fee)}</span></div>
+        <div class="receipt-row total"><span class="k">Total debit</span><span class="v num">KES ${money(total)}</span></div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:16px;" id="btn-send-payment">Review and send ${ic.arrowUp}</button>
+    </div>
+
+    <div class="card">
+      <div class="section-title"><h3>Batches</h3><span class="link">Filter</span></div>
+      <div class="stat-sub" style="margin-bottom:14px;">All batches uploaded to this organization</div>
+      ${batchesData.map(b=>`
+        <div class="list-row">
+          <div><div class="lname">${b.name}</div><div class="lmeta">${b.date} · ${b.items} items · by ${b.by}</div></div>
+          <div class="lamt num">KES ${b.total>=1000000?(b.total/1000000).toFixed(2)+'M':(b.total/1000).toFixed(1)+'K'}<div class="sub" style="margin-top:4px;">${badge(b.status)}</div></div>
+        </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function pageApprovals(){
+  const sel = approvalsQueue.find(a=>a.id===state.selectedApproval) || approvalsQueue[0];
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Approval queue</div>
+      <h1>Pending approvals</h1>
+      <div class="desc">Every approval shows total payout, 2% fee, and combined debit. Reject with a reason.</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <div class="section-title"><h3>Queue</h3><span class="stat-sub">${approvalsQueue.length} item${approvalsQueue.length===1?'':'s'}</span></div>
+      ${approvalsQueue.length ? approvalsQueue.map(b=>`
+        <div class="batch-item ${sel && sel.id===b.id?'sel':''}" data-approval="${b.id}">
+          <div class="top"><div class="nm">${b.name}</div><div class="amt num">KES ${(b.base+b.fee)>=1000000?((b.base+b.fee)/1000000).toFixed(2)+'M':((b.base+b.fee)/1000).toFixed(1)+'K'}</div></div>
+          <div class="meta">${b.items} items · submitted by ${b.by} · runs ${b.runDate}</div>
+        </div>`).join('') : `<div style="text-align:center; padding:40px 10px; color:var(--slate);">Queue is clear — nothing waiting on your review.</div>`}
+    </div>
+
+    ${sel ? `
+    <div class="card">
+      <div class="eyebrow-lab">Batch #${sel.id}</div>
+      <h3 style="font-size:18px; margin-bottom:4px;">${sel.name}</h3>
+      <div class="desc" style="margin-bottom:16px;">Submitted by ${sel.by} · scheduled for ${sel.runDate}</div>
+
+      <div class="breakdown-mini">
+        <div class="bd-box"><div class="l">Base payout</div><div class="v">KES ${money(sel.base)}</div></div>
+        <div class="bd-box"><div class="l">Processing fee (2%)</div><div class="v">KES ${money(sel.fee)}</div></div>
+        <div class="bd-box total"><div class="l">Total debit</div><div class="v">KES ${money(sel.base+sel.fee)}</div></div>
+      </div>
+
+      <div class="stat-sub" style="margin-bottom:8px; text-transform:uppercase; letter-spacing:0.08em; font-weight:700; font-size:10.5px;">Sample instructions (${sel.items})</div>
+      <div class="table-wrap">
+        <table class="sample-table">
+          <thead><tr><th>Recipient</th><th>Channel</th><th>Amount</th></tr></thead>
+          <tbody>
+            ${sel.sample.map(s=>`<tr><td class="cell-strong">${s.recipient}</td><td class="cell-sub">${s.channel}</td><td class="num">${money(s.amount)}</td></tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <div style="display:flex; gap:10px; margin-top:20px;">
+        <button class="btn btn-primary" style="width:auto; flex:1;" id="btn-approve">${ic.check} Approve batch</button>
+        <button class="btn btn-ghost" style="flex:1;" id="btn-reject">${ic.x} Reject</button>
+      </div>
+    </div>` : `<div class="card" style="display:flex; align-items:center; justify-content:center; color:var(--slate);">Select a batch to review it.</div>`}
+  </div>`;
+}
+
+function pageMembers(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Team</div>
+      <h1>Members and roles</h1>
+      <div class="desc">Manage who has access, what they can do, and who approves what.</div>
+    </div>
+    <div class="head-actions"><button class="btn btn-dark">${ic.plus} Invite member</button></div>
+  </div>
+
+  <div class="card" style="padding:0;">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Member</th><th>Contact</th><th>Role</th><th>Last active</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          ${membersData.map(m=>`
+            <tr class="hoverable">
+              <td>
+                <div style="display:flex; align-items:center; gap:11px;">
+                  <div class="avatar" style="background:${m.color}; width:32px; height:32px; font-size:11px;">${m.initials}</div>
+                  <div class="cell-strong">${m.name}</div>
+                </div>
+              </td>
+              <td><div>${m.email}</div><div class="cell-sub">${m.phone}</div></td>
+              <td>${m.role}</td>
+              <td>${m.active}</td>
+              <td>${badge(m.status)}</td>
+              <td><span class="link-muted" data-toast="Managing ${m.name}.">•••</span></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function pageStatements(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Ledger & statements</div>
+      <h1>Statement · July 2026</h1>
+      <div class="desc">Full transaction history with base, fee, and gross columns. Print-friendly.</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn-ghost">🖨 Print</button>
+      <button class="btn btn-dark">${ic.download} Export CSV</button>
+    </div>
+  </div>
+
+  <div class="grid cols-3" style="margin-bottom:18px;">
+    <div class="card"><div class="stat-lab">Opening balance</div><div class="stat-num num" style="font-size:24px;">KES 1.50M</div></div>
+    <div class="card"><div class="stat-lab">Total debits</div><div class="stat-num num" style="font-size:24px; color:var(--red-700);">KES 1.42M</div></div>
+    <div class="card"><div class="stat-lab">Total credits</div><div class="stat-num num" style="font-size:24px; color:var(--brand-700);">KES 250.0K</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px;">
+    <div class="stat-lab" style="margin-bottom:8px;">Fees (2%)</div>
+    <div class="stat-num num" style="font-size:22px;">KES 27.8K</div>
+  </div>
+
+  <div class="toolbar">
+    <div class="chip-row">
+      <div class="chip active">Date: Last 30d</div>
+      <div class="chip">Category: All</div>
+      <div class="chip">Channel: All</div>
+      <div class="chip">Status: All</div>
+    </div>
+    <div class="search-box">${ic.search}<input placeholder="Search references, payees…"/></div>
+  </div>
+
+  <div class="card" style="padding:0;">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Date · Time</th><th>Reference</th><th>Beneficiary · Channel</th><th>Category</th><th>Base</th><th>Fee</th><th>Gross</th><th>Status</th></tr></thead>
+        <tbody>
+          ${ledgerData.map(t=>`
+            <tr class="hoverable">
+              <td><div class="cell-strong">${t.date}</div><div class="cell-sub">${t.time}</div></td>
+              <td class="num">${t.ref}</td>
+              <td><div class="cell-strong">${t.desc}</div><div class="cell-sub">${t.sub}</div></td>
+              <td>${t.category}</td>
+              <td class="num">${money(t.base)}</td>
+              <td class="num">${money(t.fee)}</td>
+              <td class="num amt-neg">− ${money(t.base+t.fee)}</td>
+              <td>${badge(t.status)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function pageReports(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Reports</div>
+      <h1>Export operational data</h1>
+      <div class="desc">Generate CSV reports today. PDF, Excel, and richer analytics are on the way.</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:4px;">New export</h3>
+      <div class="desc" style="margin-bottom:20px;">Choose what to include. Available formats will expand over time.</div>
+      <div class="form-grid">
+        <div>
+          <label class="flabel">Data set</label>
+          <select class="fselect plain">${isIndividual()
+            ? '<option>Transactions</option><option>Recurring schedules</option>'
+            : '<option>Transactions</option><option>Payroll batches</option><option>Vendor payouts</option>'}</select>
+        </div>
+        <div>
+          <label class="flabel">Date range</label>
+          <input class="finput plain" value="This month · July 2026"/>
+        </div>
+        <div>
+          <label class="flabel">${isIndividual() ? 'Account holder' : 'Organization'}</label>
+          <input class="finput plain" value="${isIndividual() ? 'J. Kamau' : 'Solaris Logistics Ltd'}"/>
+        </div>
+        <div>
+          <label class="flabel">Format</label>
+          <select class="fselect plain"><option>CSV</option><option disabled>Excel (soon)</option><option disabled>PDF (soon)</option></select>
+        </div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:22px;" id="btn-generate">${ic.download} Generate report</button>
+    </div>
+
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:14px;">Recent exports</h3>
+      ${exportsData.map(e=>`
+        <div class="list-row">
+          <div><div class="lname">${e.name}</div><div class="lmeta">${e.meta}</div></div>
+          <div style="text-align:right;">${badge(e.status)}${e.status==='Ready'?`<div style="margin-top:6px;"><span class="link-strong" data-toast="Downloading ${e.name}.">Download</span></div>`:''}</div>
+        </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function pageIntegrations(){
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Integrations</div>
+      <h1>API keys</h1>
+      <div class="desc">Give external systems scoped access. The secret is shown once at creation — store it securely.</div>
+    </div>
+    <div class="head-actions"><button class="btn btn-dark">${ic.plus} Create key</button></div>
+  </div>
+
+  <div class="callout">
+    <div class="ic">${ic.alert}</div>
+    <div><h4>Keys are shown once</h4><p>Copy the secret at creation. Revoked keys stop authenticating requests immediately.</p></div>
+  </div>
+
+  <div class="card" style="padding:0;">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Label</th><th>Key</th><th>Scope</th><th>Created</th><th>Last used</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>
+          ${apiKeysData.map(k=>`
+            <tr class="hoverable">
+              <td class="cell-strong">${ic.key} ${k.label}</td>
+              <td class="num">${k.key}</td>
+              <td class="cell-sub">${k.scope}</td>
+              <td class="num">${k.created}</td>
+              <td>${k.lastUsed}</td>
+              <td>${badge(k.status)}</td>
+              <td>${k.status==='Revoked'?`<span style="color:var(--slate-soft);">Revoke</span>`:`<span class="link-strong" data-toast="${k.label} revoked.">Revoke</span>`}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function pageSettings(){
+  const tabs = ['Profile','Security','Payout preferences','Notifications'].concat(isIndividual()? [] : ['Organization']);
+  return `
+  <div class="page-head">
+    <div>
+      <div class="eyebrow-lab">Settings</div>
+      <h1>Profile and preferences</h1>
+      <div class="desc">Identity, security posture, notifications, and payout defaults.</div>
+    </div>
+  </div>
+
+  <div class="grid" style="grid-template-columns:220px 1fr; gap:22px;">
+    <div class="settings-tabs">
+      ${tabs.map(t=>`<div class="settings-tab ${state.settingsTab===t?'active':''}" data-tab="${t}">${t}</div>`).join('')}
+    </div>
+    <div>${renderSettingsPanel()}</div>
+  </div>`;
+}
+
+function renderSettingsPanel(){
+  if(state.settingsTab==='Profile'){
+    return `
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:2px;">Profile</h3>
+      <div class="desc" style="margin-bottom:18px;">How you appear across the platform.</div>
+      <div class="form-grid">
+        <div><label class="flabel">Full name</label><input class="finput plain" value="J. Kamau"/></div>
+        <div><label class="flabel">Email</label><input class="finput plain" value="j.kamau@solaris.co.ke"/></div>
+        <div><label class="flabel">Phone</label><input class="finput" value="+254 712 000 441"/></div>
+        <div><label class="flabel">Role</label><input class="finput plain" value="${state.role}" readonly/></div>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
+        <button class="btn btn-ghost">Cancel</button>
+        <button class="btn btn-dark" id="btn-save-profile">Save changes</button>
+      </div>
+    </div>`;
+  }
+  if(state.settingsTab==='Security'){
+    return `
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:2px;">Security</h3>
+      <div class="desc" style="margin-bottom:18px;">Passwords and session controls.</div>
+      <div class="form-grid">
+        <div><label class="flabel">Current password</label><input class="finput" type="password" placeholder="Enter current password"/></div>
+        <div><label class="flabel">New password</label><input class="finput" type="password" placeholder="At least 10 characters"/></div>
+      </div>
+      <div class="list-row" style="margin-top:10px;">
+        <div><div class="lname">Require a code for every payout</div><div class="lmeta">Adds a challenge before high-value or approval steps.</div></div>
+        <div class="toggle on" data-toggle-simple="otp"><span class="knob"></span></div>
+      </div>
+    </div>`;
+  }
+  if(state.settingsTab==='Payout preferences'){
+    return `
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:2px;">Payout preferences</h3>
+      <div class="desc" style="margin-bottom:18px;">Defaults for your outgoing payments.</div>
+      <div class="form-grid">
+        <div><label class="flabel">Default payment mode</label><input class="finput plain" value="Wallet"/></div>
+        <div><label class="flabel">M-Pesa withdrawal phone</label><input class="finput" value="+254 712 000 441"/></div>
+      </div>
+      ${isIndividual() ? '' : `
+      <div class="list-row" style="margin-top:10px;">
+        <div><div class="lname">Approval required on withdrawals</div><div class="lmeta">Sends withdrawals through the maker · checker queue.</div></div>
+        <div class="toggle on" data-toggle-simple="approval"><span class="knob"></span></div>
+      </div>`}
+    </div>`;
+  }
+  if(state.settingsTab==='Notifications'){
+    const rows = ['Due payment reminders','Batch submitted','Batch approved or rejected','Payment success','Payment failure']
+      .filter(r=> !(isIndividual() && (r==='Batch submitted' || r==='Batch approved or rejected')));
+    return `
+    <div class="card">
+      <h3 style="font-size:16px; margin-bottom:2px;">Notifications</h3>
+      <div class="desc" style="margin-bottom:14px;">What we alert you about.</div>
+      ${rows.map((r,i)=>`
+        <div class="list-row">
+          <div class="lname">${r}</div>
+          <div style="display:flex; gap:18px; align-items:center;">
+            <div style="display:flex; align-items:center; gap:8px;"><div class="toggle on" data-toggle-simple="n${i}e"><span class="knob"></span></div><span class="cell-sub">Email</span></div>
+            <div style="display:flex; align-items:center; gap:8px;"><div class="toggle on" data-toggle-simple="n${i}p"><span class="knob"></span></div><span class="cell-sub">Push</span></div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  return `
+  <div class="card">
+    <h3 style="font-size:16px; margin-bottom:2px;">Organization</h3>
+    <div class="desc" style="margin-bottom:18px;">Details shared across your team's workspace.</div>
+    <div class="form-grid">
+      <div><label class="flabel">Organization name</label><input class="finput plain" value="Solaris Logistics Ltd"/></div>
+      <div><label class="flabel">Registration number</label><input class="finput" value="PVT-2019-004821"/></div>
+    </div>
+  </div>`;
+}
+
+/* ============================ BINDINGS ============================ */
+function bindApp(){
+  document.querySelectorAll('[data-page]').forEach(node=>{
+    node.addEventListener('click', ()=>{ state.page = node.getAttribute('data-page'); state.sidebarOpen=false; render(); });
+  });
+  document.getElementById('hamburger')?.addEventListener('click', ()=>{ state.sidebarOpen = !state.sidebarOpen; render(); });
+  document.getElementById('overlay')?.addEventListener('click', ()=>{ state.sidebarOpen=false; render(); });
+
+  const roleSel = document.getElementById('role-select');
+  roleSel?.addEventListener('click', (e)=>{ e.stopPropagation(); state.roleMenuOpen = !state.roleMenuOpen; render(); });
+  document.querySelectorAll('[data-role]').forEach(o=>{
+    o.addEventListener('click', ()=>{
+      state.role = o.getAttribute('data-role'); state.roleMenuOpen=false;
+      if(isIndividual()){
+        if(['members','approvals','integrations'].includes(state.page)) state.page = 'dashboard';
+        if(state.settingsTab === 'Organization') state.settingsTab = 'Profile';
+      }
+      render();
+      toast('Preview role set to '+state.role+'.');
+    });
+  });
+  document.addEventListener('click', ()=>{ if(state.roleMenuOpen){ state.roleMenuOpen=false; render(); } }, {once:true});
+
+  document.querySelectorAll('[data-toast]').forEach(node=>{
+    node.addEventListener('click', ()=> toast(node.getAttribute('data-toast')));
+  });
+
+  // Payees
+  document.querySelectorAll('[data-filter]').forEach(c=>{
+    c.addEventListener('click', ()=>{ state.payeeFilter = c.getAttribute('data-filter'); render(); });
+  });
+  const psearch = document.getElementById('payee-search');
+  psearch?.addEventListener('input', (e)=>{ state.payeeSearch = e.target.value; render(); setTimeout(()=>{ const f=document.getElementById('payee-search'); if(f){f.focus(); f.setSelectionRange(f.value.length,f.value.length);} },0); });
+
+  // Recurring toggles
+  document.querySelectorAll('[data-toggle-recurring]').forEach(t=>{
+    t.addEventListener('click', ()=>{
+      const i = Number(t.getAttribute('data-toggle-recurring'));
+      recurringData[i].active = !recurringData[i].active;
+      render();
+      toast(recurringData[i].payee + (recurringData[i].active? ' schedule turned on.' : ' schedule paused.'));
+    });
+  });
+
+  // Generic simple toggles (settings)
+  document.querySelectorAll('[data-toggle-simple]').forEach(t=>{
+    t.addEventListener('click', ()=>{ t.classList.toggle('on'); });
+  });
+
+  // Quick pay
+  const qpAmount = document.getElementById('qp-amount');
+  qpAmount?.addEventListener('input', (e)=>{ state.quickPayAmount = e.target.value; render(); setTimeout(()=>{ const f=document.getElementById('qp-amount'); if(f) f.focus(); },0); });
+  document.querySelectorAll('[data-mode]').forEach(m=>{
+    m.addEventListener('click', ()=>{ state.quickPayMode = m.getAttribute('data-mode'); render(); });
+  });
+  document.getElementById('btn-send-payment')?.addEventListener('click', ()=> toast('Payment queued for processing.'));
+
+  // Approvals
+  document.querySelectorAll('[data-approval]').forEach(b=>{
+    b.addEventListener('click', ()=>{ state.selectedApproval = Number(b.getAttribute('data-approval')); render(); });
+  });
+  document.getElementById('btn-approve')?.addEventListener('click', ()=>{
+    const sel = approvalsQueue.find(a=>a.id===state.selectedApproval);
+    approvalsQueue = approvalsQueue.filter(a=>a.id!==state.selectedApproval);
+    state.selectedApproval = approvalsQueue.length? approvalsQueue[0].id : null;
+    render();
+    toast((sel?sel.name:'Batch') + ' approved and released for payout.');
+  });
+  document.getElementById('btn-reject')?.addEventListener('click', ()=>{
+    const sel = approvalsQueue.find(a=>a.id===state.selectedApproval);
+    approvalsQueue = approvalsQueue.filter(a=>a.id!==state.selectedApproval);
+    state.selectedApproval = approvalsQueue.length? approvalsQueue[0].id : null;
+    render();
+    toast((sel?sel.name:'Batch') + ' sent back to the maker.', 'err');
+  });
+
+  // Settings tabs
+  document.querySelectorAll('[data-tab]').forEach(t=>{
+    t.addEventListener('click', ()=>{ state.settingsTab = t.getAttribute('data-tab'); render(); });
+  });
+  document.getElementById('btn-save-profile')?.addEventListener('click', ()=> toast('Profile changes saved.'));
+  document.getElementById('btn-generate')?.addEventListener('click', ()=> toast('Report is generating — it will appear under Recent exports.'));
+}
+
+render();
+</script>
+</body>
+</html>

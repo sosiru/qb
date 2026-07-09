@@ -1,0 +1,90 @@
+{% extends "portal/base.html" %}
+{% load portal_tags %}
+{% block title %}Statements{% endblock %}
+{% block page_heading %}{{ page_title }}{% endblock %}
+{% block page_subheading %}{{ page_description }}{% endblock %}
+{% block page_actions %}
+  <a class="button primary" href="{% url 'portal:statements' %}{% if selected_organization %}?organization_id={{ selected_organization.id }}&print=1{% else %}?print=1{% endif %}">Print view</a>
+{% endblock %}
+{% block content %}
+  <section class="statement-sheet">
+    <div class="statement-head">
+      <div>
+        <div class="brand" style="margin-bottom: 12px;">
+          <div class="brand-mark">R</div>
+          <div class="brand-copy">
+            <strong>Quick Bundl Statement</strong>
+            <span>{{ statement_summary.scope }}</span>
+          </div>
+        </div>
+        <div class="muted">Issued on {{ statement_summary.issued_on|date:"d M Y" }}</div>
+      </div>
+      <div class="cta-row screen-only">
+        <a class="button" href="{% url 'portal:reports' %}{% if selected_organization %}?organization_id={{ selected_organization.id }}{% endif %}">Back to reports</a>
+      </div>
+    </div>
+
+    <div class="statement-meta">
+      <div class="mini-stat"><span class="muted">Transactions</span><strong>{{ statement_summary.transaction_count }}</strong></div>
+      <div class="mini-stat"><span class="muted">Processing fees</span><strong>{{ statement_summary.processing_fees_display }}</strong></div>
+      <div class="mini-stat"><span class="muted">Gross throughput</span><strong>{{ statement_summary.gross_display }}</strong></div>
+      <div class="mini-stat"><span class="muted">Scope</span><strong>{{ statement_summary.scope }}</strong></div>
+    </div>
+
+    <section class="surface" style="margin-bottom: 18px;">
+      <div class="surface-header">
+        <h2>Transaction detail</h2>
+        <span class="muted">2% service charge shown per transaction</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Recipient</th><th>Method</th><th>Principal</th><th>Fee</th><th>Gross</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {% for row in statement_rows %}
+              <tr>
+                <td>{{ row.created_at|date:"d M Y" }}</td>
+                <td>{{ row.recipient_name }}</td>
+                <td><span class="chip {{ row.recipient_type|tone }}">{{ row.recipient_type|human_label }}</span></td>
+                <td class="amount">{{ row.amount_minor|money }}</td>
+                <td class="amount">{{ row.fee_amount_minor|money }}</td>
+                <td class="amount">{{ row.amount_minor|add:row.fee_amount_minor|money }}</td>
+                <td><span class="chip {{ row.status|tone }}">{{ row.status|human_label }}</span></td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="7" class="muted">No transaction rows available for this statement period.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-header">
+        <h2>Wallet movements</h2>
+        <span class="muted">Funding, disbursement, and balance trail</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Reference</th><th>Type</th><th>Amount</th><th>Balance after</th></tr>
+          </thead>
+          <tbody>
+            {% for row in ledger_rows %}
+              <tr>
+                <td>{{ row.created_at|date:"d M Y H:i" }}</td>
+                <td>{{ row.reference }}</td>
+                <td>{{ row.entry_type|human_label }}</td>
+                <td class="amount">{{ row.amount_minor|money }}</td>
+                <td class="amount">{{ row.balance_after_minor|money }}</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="5" class="muted">No wallet ledger entries yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+{% endblock %}

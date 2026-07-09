@@ -1,0 +1,70 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="cryptography" />
+          <option value="django-daterange-filter" />
+          <option value="django-dotenv" />
+          <option value="docxtpl" />
+          <option value="matplotlib" />
+          <option value="Jinja2" />
+          <option value="xhtml2pdf" />
+          <option value="python-bidi" />
+          <option value="numpy" />
+          <option value="pdfminer.six" />
+          <option value="pdfplumber" />
+          <option value="pillow" />
+          <option value="plotnine" />
+          <option value="psycopg2-binary" />
+          <option value="pyexcel-io" />
+          <option value="pyexcel-xlsx" />
+          <option value="pypdf" />
+          <option value="PyMuPDF" />
+          <option value="python-docx" />
+          <option value="requests" />
+          <option value="tabula-py" />
+          <option value="uWSGI" />
+          <option value="xlrd" />
+          <option value="gunicorn" />
+          <option value="pandas" />
+          <option value="markupsafe" />
+          <option value="aws-sam-cli" />
+          <option value="mapping" />
+          <option value="django-cors-headers" />
+          <option value="boto3" />
+          <option value="django-storages" />
+          <option value="pdfid" />
+          <option value="reportlab" />
+          <option value="Levenshtein" />
+          <option value="python-Levenshtein" />
+          <option value="rapidfuzz" />
+          <option value="holidays" />
+          <option value="pika" />
+          <option value="aio_pika" />
+          <option value="loguru" />
+          <option value="django-celery-beat" />
+          <option value="kombu" />
+          <option value="celery" />
+          <option value="flower" />
+          <option value="ruff" />
+          <option value="whitenoise" />
+          <option value="XlsxWriter" />
+          <option value="opencv-python" />
+          <option value="groq" />
+          <option value="django-silk" />
+          <option value="pre-commit" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyStubPackagesAdvertiser" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="pandas" />
+          <option value="celery" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>

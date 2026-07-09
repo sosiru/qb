@@ -7,7 +7,24 @@ from eusers.models import AccessToken, User
 from notifications.models import NotificationEvent, NotificationTemplate
 from reports.models import ReportExport
 
-from .models import Organization, OrganizationMembership, OutboxEvent, Payee, PaymentBatch, PaymentInstruction, PaymentSchedule, Wallet, WalletLedgerEntry
+from .models import (
+    CircuitBreakerState,
+    IdempotencyRecord,
+    LedgerMovement,
+    LedgerTransaction,
+    Organization,
+    OrganizationMembership,
+    OutboxEvent,
+    Payee,
+    PayeePreset,
+    PaymentBatch,
+    PaymentInstruction,
+    PaymentSchedule,
+    ReconciliationException,
+    TransactionEvent,
+    Wallet,
+    WalletLedgerEntry,
+)
 
 
 class TimestampedAdminMixin:
@@ -342,6 +359,13 @@ class PayeeAdmin(TimestampedAdminMixin, admin.ModelAdmin):
         return obj.schedules.count()
 
 
+@admin.register(PayeePreset)
+class PayeePresetAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("label", "payee_type", "paybill_number", "till_number", "expense_category", "active", "created_at")
+    list_filter = ("payee_type", "active", "expense_category", "created_at")
+    search_fields = ("id", "label", "paybill_number", "till_number", "expense_category")
+
+
 @admin.register(PaymentSchedule)
 class PaymentScheduleAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     list_display = ("payee", "amount_minor", "day_of_month", "active", "owner_scope", "created_at")
@@ -508,13 +532,74 @@ class OutboxEventAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     readonly_fields = TimestampedAdminMixin.readonly_fields + ("payload",)
 
 
-@admin.register(AuditLog)
-class AuditLogAdmin(TimestampedAdminMixin, admin.ModelAdmin):
-    list_display = ("action", "actor", "target_type", "target_id", "created_at")
-    list_filter = ("target_type", "action", "created_at")
-    search_fields = ("action", "target_type", "target_id", "actor__phone_number", "actor__full_name", "actor__email")
+@admin.register(LedgerTransaction)
+class LedgerTransactionAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("reference", "transaction_type", "status", "source", "actor", "created_at")
+    list_filter = ("transaction_type", "status", "source", "created_at")
+    search_fields = ("reference", "description", "actor__phone_number", "actor__email", "actor__full_name")
     autocomplete_fields = ("actor",)
     readonly_fields = TimestampedAdminMixin.readonly_fields + ("metadata",)
+
+
+@admin.register(LedgerMovement)
+class LedgerMovementAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = (
+        "transaction",
+        "account_code",
+        "direction",
+        "amount_minor",
+        "currency",
+        "balance_before_minor",
+        "balance_after_minor",
+        "wallet",
+        "created_at",
+    )
+    list_filter = ("direction", "currency", "account_code", "created_at")
+    search_fields = ("transaction__reference", "account_code", "description", "wallet__user__phone_number", "wallet__organization__name")
+    autocomplete_fields = ("transaction", "wallet")
+    readonly_fields = TimestampedAdminMixin.readonly_fields + ("metadata",)
+
+
+@admin.register(IdempotencyRecord)
+class IdempotencyRecordAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("key", "user", "method", "path", "status", "response_status", "created_at")
+    list_filter = ("status", "method", "path", "created_at")
+    search_fields = ("key", "path", "request_hash", "user__phone_number", "user__email")
+    autocomplete_fields = ("user",)
+    readonly_fields = TimestampedAdminMixin.readonly_fields + ("response_body",)
+
+
+@admin.register(TransactionEvent)
+class TransactionEventAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("aggregate_type", "aggregate_id", "event_type", "from_status", "to_status", "actor", "created_at")
+    list_filter = ("aggregate_type", "event_type", "from_status", "to_status", "created_at")
+    search_fields = ("aggregate_id", "event_type", "provider_reference", "actor__phone_number", "actor__email")
+    autocomplete_fields = ("actor",)
+    readonly_fields = TimestampedAdminMixin.readonly_fields + ("payload",)
+
+
+@admin.register(ReconciliationException)
+class ReconciliationExceptionAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("source", "reference", "internal_reference", "status", "expected_amount_minor", "actual_amount_minor", "currency", "created_at")
+    list_filter = ("source", "status", "currency", "created_at")
+    search_fields = ("source", "reference", "internal_reference")
+    readonly_fields = TimestampedAdminMixin.readonly_fields + ("details",)
+
+
+@admin.register(CircuitBreakerState)
+class CircuitBreakerStateAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("name", "status", "failure_count", "opened_until", "last_error", "updated_at")
+    list_filter = ("status", "opened_until", "updated_at")
+    search_fields = ("name", "last_error")
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    list_display = ("action", "description", "actor", "target_type", "target_id", "created_at")
+    list_filter = ("target_type", "action", "created_at")
+    search_fields = ("action", "description", "target_type", "target_id", "actor__phone_number", "actor__full_name", "actor__email")
+    autocomplete_fields = ("actor",)
+    readonly_fields = TimestampedAdminMixin.readonly_fields + ("description", "metadata")
 
 
 @admin.register(ReportExport)
@@ -525,6 +610,6 @@ class ReportExportAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     autocomplete_fields = ("requested_by", "organization")
 
 
-admin.site.site_header = "Route Administration"
-admin.site.site_title = "Route Admin"
+admin.site.site_header = "Quick Bundl Administration"
+admin.site.site_title = "Quick Bundl Admin"
 admin.site.index_title = "Operations Console"

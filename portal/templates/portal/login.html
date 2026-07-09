@@ -1,0 +1,50 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quick Bundl Portal Login</title>
+  <link rel="stylesheet" href="{% static 'portal/app.css' %}">
+</head>
+<body>
+  <div class="auth-shell">
+    <section class="auth-card">
+      <div class="brand" style="margin-bottom: 18px;">
+        <div class="brand-mark">R</div>
+        <div class="brand-copy">
+          <strong>Quick Bundl</strong>
+          <span>Operations portal</span>
+        </div>
+      </div>
+      <h1 style="margin: 0 0 8px;">Sign in</h1>
+      <p class="muted" style="margin-top: 0;">Use your phone number, password, and OTP when prompted.</p>
+      {% if error %}
+        <div class="notice error">{{ error }}</div>
+      {% endif %}
+      {% if message %}
+        <div class="notice info" style="margin-top: 12px;">{{ message }}</div>
+      {% endif %}
+      <form method="post" class="auth-grid" style="margin-top: 16px;">
+        {% csrf_token %}
+        <label>
+          <div class="muted" style="margin-bottom: 6px;">Phone number</div>
+          <input class="input" type="text" name="phone_number" value="{{ phone_number|default:'' }}" placeholder="2547XXXXXXXX">
+        </label>
+        <label>
+          <div class="muted" style="margin-bottom: 6px;">Password</div>
+          <input class="input" type="password" name="password" placeholder="Your password">
+        </label>
+        <label>
+          <div class="muted" style="margin-bottom: 6px;">OTP</div>
+          <input class="input" type="text" name="otp" placeholder="Enter OTP after password verification">
+        </label>
+        {% if dev_otp %}
+          <div class="notice info">Development OTP: <strong>{{ dev_otp }}</strong></div>
+        {% endif %}
+        <button class="button primary" type="submit">Continue</button>
+      </form>
+    </section>
+  </div>
+</body>
+</html>
