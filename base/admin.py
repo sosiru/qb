@@ -4,14 +4,13 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from api.models import IntegrationApiKey
 from audit.models import AuditLog
 from eusers.models import AccessToken, User
+from ledger.models import Account
 from notifications.models import NotificationEvent, NotificationTemplate
 from reports.models import ReportExport
 
 from .models import (
     CircuitBreakerState,
     IdempotencyRecord,
-    LedgerMovement,
-    LedgerTransaction,
     Organization,
     OrganizationMembership,
     OutboxEvent,
@@ -22,8 +21,6 @@ from .models import (
     PaymentSchedule,
     ReconciliationException,
     TransactionEvent,
-    Wallet,
-    WalletLedgerEntry,
 )
 
 
@@ -35,13 +32,6 @@ class OrganizationMembershipInline(admin.TabularInline):
     model = OrganizationMembership
     extra = 0
     autocomplete_fields = ("user",)
-
-
-class WalletInline(admin.TabularInline):
-    model = Wallet
-    extra = 0
-    fields = ("wallet_type", "currency", "available_balance_minor", "organization")
-    readonly_fields = ("available_balance_minor",)
 
 
 class AccessTokenInline(admin.TabularInline):
@@ -88,17 +78,6 @@ class PaymentScheduleInline(admin.TabularInline):
     readonly_fields = ("created_at",)
 
 
-class WalletLedgerEntryInline(admin.TabularInline):
-    model = WalletLedgerEntry
-    extra = 0
-    fields = ("entry_type", "amount_minor", "balance_after_minor", "reference", "created_at")
-    readonly_fields = ("entry_type", "amount_minor", "balance_after_minor", "reference", "created_at")
-    can_delete = False
-
-    def has_add_permission(self, request, obj=None):
-        return False
-
-
 class PaymentInstructionInline(admin.TabularInline):
     model = PaymentInstruction
     extra = 0
@@ -109,7 +88,7 @@ class PaymentInstructionInline(admin.TabularInline):
         "category",
         "status",
         "external_reference",
-        "provider_reference",
+        "microservice_request_id",
     )
     readonly_fields = (
         "recipient_name",
@@ -118,7 +97,7 @@ class PaymentInstructionInline(admin.TabularInline):
         "category",
         "status",
         "external_reference",
-        "provider_reference",
+        "microservice_request_id",
     )
     can_delete = False
 
@@ -164,7 +143,7 @@ class UserAdmin(TimestampedAdminMixin, BaseUserAdmin):
         "date_joined",
     )
     search_fields = ("id", "phone_number", "full_name", "email")
-    inlines = (OrganizationMembershipInline, WalletInline, AccessTokenInline, UserIntegrationApiKeyInline, NotificationEventInline)
+    inlines = (OrganizationMembershipInline, AccessTokenInline, UserIntegrationApiKeyInline, NotificationEventInline)
     fieldsets = (
         (
             "Identity",
@@ -217,8 +196,8 @@ class UserAdmin(TimestampedAdminMixin, BaseUserAdmin):
 
     @admin.display(description="Primary Balance")
     def primary_wallet_balance(self, obj):
-        wallet = obj.wallets.filter(wallet_type=Wallet.WalletType.PRIMARY).first()
-        return wallet.available_balance_minor if wallet else 0
+        account = obj.billing_accounts.filter(account_kind=Account.AccountKind.PRIMARY).first()
+        return account.available_balance_minor if account else 0
 
 
 @admin.register(AccessToken)
@@ -235,6 +214,20 @@ class AccessTokenAdmin(TimestampedAdminMixin, admin.ModelAdmin):
 
 @admin.register(Organization)
 class OrganizationAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    fields = (
+        "id",
+        "name",
+        "slug",
+        "registration_number",
+        "tax_identification_document",
+        "business_registration_certificate",
+        "kyc_status",
+        "default_currency",
+        "push_notifications_enabled",
+        "sms_notifications_enabled",
+        "created_at",
+        "updated_at",
+    )
     list_display = (
         "name",
         "slug",
@@ -247,7 +240,7 @@ class OrganizationAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     )
     list_filter = ("kyc_status", "default_currency", "sms_notifications_enabled", "push_notifications_enabled", "created_at")
     search_fields = ("id", "name", "slug")
-    inlines = (OrganizationMembershipInline, WalletInline, OrganizationIntegrationApiKeyInline)
+    inlines = (OrganizationMembershipInline, OrganizationIntegrationApiKeyInline)
 
     @admin.display(description="Members")
     def member_count(self, obj):
@@ -255,7 +248,7 @@ class OrganizationAdmin(TimestampedAdminMixin, admin.ModelAdmin):
 
     @admin.display(description="Wallets")
     def wallet_count(self, obj):
-        return obj.wallets.count()
+        return obj.billing_accounts.count()
 
 
 @admin.register(OrganizationMembership)
@@ -270,51 +263,6 @@ class OrganizationMembershipAdmin(TimestampedAdminMixin, admin.ModelAdmin):
         "user__email",
     )
     autocomplete_fields = ("organization", "user")
-
-
-@admin.register(Wallet)
-class WalletAdmin(TimestampedAdminMixin, admin.ModelAdmin):
-    list_display = (
-        "id",
-        "owner_display",
-        "owner_type",
-        "wallet_type",
-        "currency",
-        "available_balance_minor",
-        "created_at",
-    )
-    list_filter = ("owner_type", "wallet_type", "currency", "created_at")
-    search_fields = (
-        "id",
-        "user__phone_number",
-        "user__full_name",
-        "organization__name",
-        "organization__slug",
-    )
-    autocomplete_fields = ("user", "organization")
-    inlines = (WalletLedgerEntryInline,)
-
-    @admin.display(description="Owner")
-    def owner_display(self, obj):
-        if obj.user_id:
-            return f"{obj.user.full_name} ({obj.user.phone_number})"
-        if obj.organization_id:
-            return obj.organization.name
-        return "-"
-
-
-@admin.register(WalletLedgerEntry)
-class WalletLedgerEntryAdmin(TimestampedAdminMixin, admin.ModelAdmin):
-    list_display = ("wallet", "entry_type", "amount_minor", "balance_after_minor", "reference", "created_at")
-    list_filter = ("entry_type", "created_at", "wallet__wallet_type", "wallet__owner_type")
-    search_fields = (
-        "reference",
-        "wallet__id",
-        "wallet__user__phone_number",
-        "wallet__user__full_name",
-        "wallet__organization__name",
-    )
-    autocomplete_fields = ("wallet",)
 
 
 @admin.register(Payee)
@@ -441,7 +389,7 @@ class PaymentInstructionAdmin(TimestampedAdminMixin, admin.ModelAdmin):
         "category",
         "status",
         "external_reference",
-        "provider_reference",
+        "microservice_request_id",
         "created_at",
     )
     list_filter = ("recipient_type", "status", "category", "created_at")
@@ -449,7 +397,7 @@ class PaymentInstructionAdmin(TimestampedAdminMixin, admin.ModelAdmin):
         "id",
         "recipient_name",
         "external_reference",
-        "provider_reference",
+        "microservice_request_id",
         "failure_reason",
         "batch__id",
         "payee__label",
@@ -532,34 +480,6 @@ class OutboxEventAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     readonly_fields = TimestampedAdminMixin.readonly_fields + ("payload",)
 
 
-@admin.register(LedgerTransaction)
-class LedgerTransactionAdmin(TimestampedAdminMixin, admin.ModelAdmin):
-    list_display = ("reference", "transaction_type", "status", "source", "actor", "created_at")
-    list_filter = ("transaction_type", "status", "source", "created_at")
-    search_fields = ("reference", "description", "actor__phone_number", "actor__email", "actor__full_name")
-    autocomplete_fields = ("actor",)
-    readonly_fields = TimestampedAdminMixin.readonly_fields + ("metadata",)
-
-
-@admin.register(LedgerMovement)
-class LedgerMovementAdmin(TimestampedAdminMixin, admin.ModelAdmin):
-    list_display = (
-        "transaction",
-        "account_code",
-        "direction",
-        "amount_minor",
-        "currency",
-        "balance_before_minor",
-        "balance_after_minor",
-        "wallet",
-        "created_at",
-    )
-    list_filter = ("direction", "currency", "account_code", "created_at")
-    search_fields = ("transaction__reference", "account_code", "description", "wallet__user__phone_number", "wallet__organization__name")
-    autocomplete_fields = ("transaction", "wallet")
-    readonly_fields = TimestampedAdminMixin.readonly_fields + ("metadata",)
-
-
 @admin.register(IdempotencyRecord)
 class IdempotencyRecordAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     list_display = ("key", "user", "method", "path", "status", "response_status", "created_at")
@@ -573,7 +493,7 @@ class IdempotencyRecordAdmin(TimestampedAdminMixin, admin.ModelAdmin):
 class TransactionEventAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     list_display = ("aggregate_type", "aggregate_id", "event_type", "from_status", "to_status", "actor", "created_at")
     list_filter = ("aggregate_type", "event_type", "from_status", "to_status", "created_at")
-    search_fields = ("aggregate_id", "event_type", "provider_reference", "actor__phone_number", "actor__email")
+    search_fields = ("aggregate_id", "event_type", "microservice_request_id", "actor__phone_number", "actor__email")
     autocomplete_fields = ("actor",)
     readonly_fields = TimestampedAdminMixin.readonly_fields + ("payload",)
 

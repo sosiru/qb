@@ -9,8 +9,16 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.utils import timezone
 
 from audit.models import AuditLog
-from base.models import IdempotencyRecord, OrganizationInvite, OrganizationMembership, PaymentBatch, Wallet
-from ledger.models import LedgerEntry, WalletAccount
+from base.models import (
+    IdempotencyRecord,
+    OrganizationInvite,
+    OrganizationMembership,
+    OutboxEvent,
+    PaymentBatch,
+    PaymentInstruction,
+)
+from ledger.models import Account, Transaction as LedgerTransactionRecord
+from ledger.services import PaymentInterface
 from base.services import (
     DomainError,
     ValidationError,
@@ -61,7 +69,7 @@ from reports.models import ReportExport
 from reports.services import export_transactions_csv_rows, generate_transaction_statement_pdf, record_transaction_export
 from eusers.utils import normalize_phone_number
 
-from .auth import api_view, json_error, parse_json, require_auth
+from .auth import api_view, get_request_data, json_error, require_auth
 from .services import issue_integration_api_key, list_integration_api_keys, revoke_integration_api_key
 
 logger = logging.getLogger(__name__)
@@ -339,6 +347,8 @@ def _serialize_organization(organization, role=None):
         "name": organization.name,
         "slug": organization.slug,
         "registration_number": organization.registration_number,
+        "tax_identification_document": organization.tax_identification_document.url if organization.tax_identification_document else "",
+        "business_registration_certificate": organization.business_registration_certificate.url if organization.business_registration_certificate else "",
         "kyc_status": organization.kyc_status,
         "default_currency": organization.default_currency,
         "push_notifications_enabled": organization.push_notifications_enabled,
@@ -379,12 +389,13 @@ def _serialize_organization_invite(invite, invite_link=None):
 
 
 def _serialize_ledger_entry(entry):
-    fee_amount_minor = int((entry.metadata or {}).get("fee_amount_minor") or 0)
-    base_amount_minor = int((entry.metadata or {}).get("base_amount_minor") or abs(entry.amount_minor) - fee_amount_minor)
-    gross_amount_minor = int((entry.metadata or {}).get("gross_amount_minor") or abs(entry.amount_minor))
-    wallet = entry.account if isinstance(entry, LedgerEntry) else entry.wallet
-    entry_type = (entry.metadata or {}).get("entry_type") or entry.entry_type
-    amount_minor = -entry.amount_minor if getattr(entry, "transaction_type", "") == LedgerEntry.TransactionType.WITHDRAWAL else entry.amount_minor
+    metadata = entry.metadata or {}
+    fee_amount_minor = int(metadata.get("fee_amount_minor") or 0)
+    base_amount_minor = int(metadata.get("base_amount_minor") or entry.amount_minor - fee_amount_minor)
+    gross_amount_minor = int(metadata.get("gross_amount_minor") or entry.amount_minor)
+    wallet = entry.account
+    entry_type = metadata.get("entry_type") or entry.transaction_type.name
+    amount_minor = -entry.amount_minor if entry.direction == LedgerTransactionRecord.Direction.PAY_OUT else entry.amount_minor
     return {
         "id": str(entry.id),
         "wallet_id": str(wallet.id),
@@ -395,10 +406,10 @@ def _serialize_ledger_entry(entry):
         "fee_amount_minor": fee_amount_minor,
         "gross_amount_minor": gross_amount_minor,
         "balance_after_minor": entry.balance_after_minor,
-        "reference": entry.reference,
-        "description": ledger_description(entry.entry_type, entry.metadata),
-        "metadata": entry.metadata,
-        "status": entry.metadata.get("status", "SUCCEEDED"),
+        "reference": entry.internal_reference,
+        "description": entry.description or ledger_description(entry_type, metadata),
+        "metadata": metadata,
+        "status": entry.status,
         "created_at": entry.created_at.isoformat(),
     }
 
@@ -416,7 +427,7 @@ def _serialize_instruction(instruction):
         "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
         "category": instruction.category,
         "external_reference": instruction.external_reference,
-        "provider_reference": instruction.provider_reference,
+        "microservice_request_id": instruction.microservice_request_id,
         "status": instruction.status,
         "failure_reason": instruction.failure_reason,
     }
@@ -462,14 +473,17 @@ def health_view(request):
 
 
 @api_view
-@require_auth
 def register_view(request):
     logger.info("api.auth.register.request method=%s", request.method)
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     payload = {}
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        for file_key in ("tax_identification_document", "business_registration_certificate"):
+            if file_key in request.FILES:
+                data[file_key] = request.FILES[file_key]
+        payload = data
         user, token = register_user(payload)
     except DomainError as exc:
         _audit_auth_event(
@@ -500,7 +514,8 @@ def login_view(request):
         return json_error("Method not allowed.", status=405)
     payload = {}
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         user, token = login_user(payload)
     except OtpRequired as exc:
         actor = User.objects.filter(phone_number=exc.phone_number).first()
@@ -530,7 +545,8 @@ def me_view(request):
         if request.method == "GET":
             return JsonResponse({"user": _serialize_user(request.api_user)})
         if request.method == "PATCH":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             user = update_user_profile(request.api_user, payload)
             return JsonResponse({"user": _serialize_user(user)})
         return json_error("Method not allowed.", status=405)
@@ -544,7 +560,8 @@ def change_password_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         change_user_password(request.api_user, payload)
     except DomainError as exc:
         return _handle_domain_error(exc)
@@ -639,7 +656,8 @@ def organizations_view(request):
             )
             return JsonResponse({"organizations": [_serialize_organization(org) for org in organizations]})
         if request.method == "POST":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             organization = create_organization(request.api_user, payload)
             return JsonResponse(
                 {
@@ -670,7 +688,8 @@ def organization_detail_view(request, organization_id):
                 role = request.api_user.account_type
             return JsonResponse({"organization": _serialize_organization(organization, role=role)})
         if request.method == "PATCH":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             organization = update_organization(request.api_user, organization_id, payload)
             return JsonResponse({"organization": _serialize_organization(organization)})
         return json_error("Method not allowed.", status=405)
@@ -694,7 +713,8 @@ def organization_members_view(request, organization_id):
             )
             return JsonResponse({"memberships": [_serialize_membership(membership) for membership in memberships]})
         if request.method == "POST":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             membership = add_organization_member(request.api_user, organization_id, payload)
             return JsonResponse({"membership": _serialize_membership(membership)}, status=201)
         return json_error("Method not allowed.", status=405)
@@ -713,7 +733,8 @@ def organization_invites_view(request, organization_id):
             invites = OrganizationInvite.objects.filter(organization=organization).order_by("-created_at")[:100]
             return JsonResponse({"invites": [_serialize_organization_invite(invite) for invite in invites]})
         if request.method == "POST":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             invite, invite_link = invite_organization_member(request.api_user, organization_id, payload)
             return JsonResponse({"invite": _serialize_organization_invite(invite, invite_link=invite_link)}, status=201)
         return json_error("Method not allowed.", status=405)
@@ -727,7 +748,8 @@ def organization_invite_accept_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         user, token, membership = accept_organization_invite(payload)
         return JsonResponse(
             {
@@ -748,7 +770,8 @@ def organization_invite_accept_view(request):
 def organization_member_detail_view(request, organization_id, membership_id):
     try:
         if request.method == "PATCH":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             membership = update_organization_member(request.api_user, organization_id, membership_id, payload)
             return JsonResponse({"membership": _serialize_membership(membership)})
         if request.method == "DELETE":
@@ -829,7 +852,8 @@ def payees_view(request):
             )
             return JsonResponse({"payees": [_serialize_payee(payee) for payee in payees]})
         if request.method == "POST":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             payee = create_payee(request.api_user, payload)
             return JsonResponse({"payee": _serialize_payee(payee)}, status=201)
         return json_error("Method not allowed.", status=405)
@@ -845,7 +869,8 @@ def payee_detail_view(request, payee_id):
             payee = get_payee_for_user(request.api_user, payee_id)
             return JsonResponse({"payee": _serialize_payee(payee)})
         if request.method == "PATCH":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             payee = update_payee(request.api_user, payee_id, payload)
             return JsonResponse({"payee": _serialize_payee(payee)})
         if request.method == "DELETE":
@@ -874,7 +899,8 @@ def schedules_view(request):
             )
             return JsonResponse({"schedules": [_serialize_schedule(schedule) for schedule in schedules]})
         if request.method == "POST":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             schedule = create_schedule(request.api_user, payload)
             return JsonResponse({"schedule": _serialize_schedule(schedule)}, status=201)
         return json_error("Method not allowed.", status=405)
@@ -892,7 +918,8 @@ def schedule_detail_view(request, schedule_id):
             schedule = get_schedule_for_user(request.api_user, schedule_id)
             return JsonResponse({"schedule": _serialize_schedule(schedule)})
         if request.method == "PATCH":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             schedule = update_schedule(request.api_user, schedule_id, payload)
             return JsonResponse({"schedule": _serialize_schedule(schedule)})
         if request.method == "DELETE":
@@ -912,10 +939,29 @@ def wallet_topup_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
+        logger.info(
+            "api.wallet_topup.request user_id=%s phone=%s payload=%s",
+            request.api_user.id,
+            request.api_user.phone_number,
+            payload,
+        )
         wallet = top_up_wallet(request.api_user, payload)
     except DomainError as exc:
+        logger.warning(
+            "api.wallet_topup.domain_error user_id=%s error=%s",
+            getattr(request.api_user, "id", None),
+            exc,
+        )
         return _handle_domain_error(exc)
+    logger.info(
+        "api.wallet_topup.success user_id=%s wallet_id=%s available_balance_minor=%s uncleared_balance_minor=%s",
+        request.api_user.id,
+        wallet.id,
+        getattr(wallet, "available_balance_minor", None),
+        getattr(wallet, "uncleared_balance_minor", None),
+    )
     return JsonResponse({"wallet": _serialize_wallet(wallet)})
 
 
@@ -926,7 +972,8 @@ def wallet_vault_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         primary_wallet, vault_wallet = transfer_to_vault(request.api_user, payload)
     except DomainError as exc:
         return _handle_domain_error(exc)
@@ -940,7 +987,8 @@ def wallet_withdrawal_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         wallet, entry = withdraw_to_mpesa(request.api_user, payload)
     except DomainError as exc:
         return _handle_domain_error(exc)
@@ -950,14 +998,14 @@ def wallet_withdrawal_view(request):
 @api_view
 @require_auth
 def wallet_summary_view(request):
-    wallets = WalletAccount.objects.filter(user=request.api_user).order_by("wallet_type")
+    wallets = Account.objects.filter(user=request.api_user).order_by("account_kind")
     if request.GET.get("organization_id"):
         organization_id = request.GET["organization_id"]
         try:
             organization = get_organization_for_user(request.api_user, organization_id)
         except DomainError as exc:
             return _handle_domain_error(exc)
-        wallets = WalletAccount.objects.filter(organization=organization).order_by("wallet_type")
+        wallets = Account.objects.filter(organization=organization).order_by("account_kind")
     return JsonResponse({"wallets": [_serialize_wallet(wallet) for wallet in wallets]})
 
 
@@ -979,13 +1027,33 @@ def wallet_ledger_view(request):
 
 
 @api_view
+def payment_webhook_view(request):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    try:
+        payload = get_request_data(request)
+        payment_request = PaymentInterface().handle_webhook(payload)
+    except Exception as exc:
+        logger.warning("payment.webhook.failed error=%s", exc, exc_info=True)
+        return json_error(str(exc), status=400)
+    return JsonResponse(
+        {
+            "status": payment_request.status,
+            "originator_ref": payment_request.originator_ref,
+            "transaction_id": str(payment_request.transaction_id),
+        }
+    )
+
+
+@api_view
 @require_auth
 @require_idempotency
 def pay_all_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         batch = pay_individual_due_items(request.api_user, payload)
     except DomainError as exc:
         return _handle_domain_error(exc)
@@ -999,7 +1067,8 @@ def quick_pay_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         batch = quick_pay(request.api_user, payload)
     except DomainError as exc:
         return _handle_domain_error(exc)
@@ -1013,7 +1082,8 @@ def corporate_batch_upload_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         batch = upload_corporate_batch(request.api_user, payload)
     except DomainError as exc:
         return _handle_domain_error(exc)
@@ -1057,7 +1127,8 @@ def corporate_batch_reject_view(request, batch_id):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
     try:
-        payload = parse_json(request)
+        data = get_request_data(request)
+        payload = data
         batch = reject_batch(request.api_user, batch_id, payload)
     except Http404:
         return json_error("Batch not found.", status=404)
@@ -1243,32 +1314,14 @@ def report_exports_view(request):
 
 @api_view
 @require_auth
-def pesaway_results_view(request):
-    if request.method != "POST":
-        return json_error("Method not allowed.", status=405)
-    try:
-        payload = parse_json(request)
-    except ValueError as exc:
-        return json_error(str(exc), status=400)
-    AuditLog.objects.create(
-        actor=None,
-        action="pesaway.callback.received",
-        target_type="pesaway_callback",
-        target_id=uuid.uuid4(),
-        metadata=payload,
-    )
-    return JsonResponse({"status": "received"})
-
-
-@api_view
-@require_auth
 def integration_api_keys_view(request):
     try:
         if request.method == "GET":
             api_keys = list_integration_api_keys(request.api_user, request.GET.get("organization_id"))
             return JsonResponse({"api_keys": [_serialize_integration_api_key(api_key) for api_key in api_keys]})
         if request.method == "POST":
-            payload = parse_json(request)
+            data = get_request_data(request)
+            payload = data
             api_key, raw_key = issue_integration_api_key(request.api_user, payload)
             return JsonResponse(
                 {

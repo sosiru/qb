@@ -21,23 +21,21 @@ from audit.models import AuditLog
 from eusers.models import AccessToken, LoginOtp, User
 from eusers.utils import normalize_phone_number
 from notifications.services import queue_email_notification, queue_notifications_for_user
-from ledger.models import LedgerEntry, WalletAccount
+from ledger.models import Account, Transaction as LedgerTransactionRecord
 from ledger.services import (
-    clear_uncleared_top_up,
-    get_or_create_organization_wallet_account,
-    get_or_create_user_wallet_account,
-    post_uncleared_top_up,
-    post_top_up as post_wallet_account_top_up,
-    post_wallet_adjustment,
-    post_withdrawal as post_wallet_account_withdrawal,
-    release_wallet_reserve,
-    reserve_wallet_funds,
+    PaymentInterface,
+    complete_pay_in,
+    complete_payout,
+    get_or_create_organization_account,
+    get_or_create_user_account,
+    initiate_pay_in,
+    initiate_payout,
+    transfer_between_accounts,
+    unique_transaction_reference,
 )
 
 from .models import (
     BankDirectory,
-    LedgerMovement,
-    LedgerTransaction,
     Organization,
     OrganizationInvite,
     OrganizationMembership,
@@ -50,7 +48,6 @@ from .models import (
     PaymentSchedule,
     ReconciliationException,
     TransactionEvent,
-    Wallet,
 )
 from .utils import TransactionRefGenerator
 
@@ -92,14 +89,10 @@ class InsufficientFundsError(DomainError):
 
 
 def generate_transaction_reference():
-    for _ in range(10):
-        reference = TRANSACTION_REF_GENERATOR.generate()
-        if not LedgerEntry.objects.filter(reference=reference).exists():
-            return reference
-    raise ValidationError("Could not generate a unique transaction reference.")
+    return unique_transaction_reference("QB")
 
 
-def record_transaction_event(aggregate_type, aggregate_id, event_type, *, actor=None, from_status="", to_status="", payload=None, provider_reference=""):
+def record_transaction_event(aggregate_type, aggregate_id, event_type, *, actor=None, from_status="", to_status="", payload=None, microservice_request_id=""):
     return TransactionEvent.objects.create(
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
@@ -107,7 +100,7 @@ def record_transaction_event(aggregate_type, aggregate_id, event_type, *, actor=
         from_status=from_status or "",
         to_status=to_status or "",
         actor=actor,
-        provider_reference=provider_reference or "",
+        microservice_request_id=microservice_request_id or "",
         payload=payload or {},
     )
 
@@ -142,7 +135,7 @@ def transition_payment_batch(batch, to_status, *, actor=None, event_type=None, p
     return batch
 
 
-def transition_payment_instruction(instruction, to_status, *, actor=None, event_type=None, payload=None, provider_reference=""):
+def transition_payment_instruction(instruction, to_status, *, actor=None, event_type=None, payload=None, microservice_request_id=""):
     from_status = instruction.status
     if from_status == to_status:
         return instruction
@@ -156,7 +149,7 @@ def transition_payment_instruction(instruction, to_status, *, actor=None, event_
         )
         raise ValidationError(f"Invalid payment instruction transition {from_status} -> {to_status}.")
     instruction.status = to_status
-    instruction.save(update_fields=["status", "provider_reference", "provider_response", "failure_reason", "updated_at"])
+    instruction.save(update_fields=["status", "microservice_request_id", "microservice_response", "failure_reason", "updated_at"])
     record_transaction_event(
         "payment_instruction",
         instruction.id,
@@ -165,7 +158,7 @@ def transition_payment_instruction(instruction, to_status, *, actor=None, event_
         from_status=from_status,
         to_status=to_status,
         payload=payload,
-        provider_reference=provider_reference,
+        microservice_request_id=microservice_request_id,
     )
     return instruction
 
@@ -194,36 +187,11 @@ def _wallet_account_code(wallet):
 
 
 def _wallet_movement_ref(wallet):
-    return wallet if isinstance(wallet, Wallet) else None
+    return None
 
 
 def _wallet_idempotency_key(prefix, reference):
     return f"{prefix}:{reference}"
-
-
-def record_ledger_transaction(reference, transaction_type, movements, *, actor=None, source="", description="", metadata=None):
-    transaction_record = LedgerTransaction.objects.create(
-        reference=reference,
-        transaction_type=transaction_type,
-        actor=actor,
-        source=source,
-        description=description,
-        metadata=metadata or {},
-    )
-    for movement in movements:
-        LedgerMovement.objects.create(
-            transaction=transaction_record,
-            wallet=movement.get("wallet"),
-            account_code=movement["account_code"],
-            direction=movement["direction"],
-            amount_minor=abs(int(movement["amount_minor"])),
-            currency=movement.get("currency") or "KES",
-            balance_before_minor=int(movement.get("balance_before_minor") or 0),
-            balance_after_minor=int(movement.get("balance_after_minor") or 0),
-            description=movement.get("description", description),
-            metadata=movement.get("metadata", {}),
-        )
-    return transaction_record
 
 
 class PermissionDeniedError(DomainError):
@@ -343,26 +311,92 @@ def _serialize_activity_instruction(instruction):
         "fee_amount_minor": instruction.fee_amount_minor,
         "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
         "status": instruction.status,
-        "reference": instruction.provider_reference or instruction.external_reference or str(instruction.id),
+        "reference": instruction.microservice_request_id or instruction.external_reference or str(instruction.id),
         "description": instruction.recipient_name,
         "subtext": " · ".join(part for part in sub_parts if part),
         "created_at": instruction.created_at.isoformat(),
     }
 
 
-def provider_dispatch_enabled():
-    return bool(
-        settings.PESAWAY_ENABLED
-        and settings.PESAWAY_CLIENT_ID
-        and settings.PESAWAY_CLIENT_SECRET
+def payment_microservice_dispatch_enabled():
+    return bool(getattr(settings, "PAYMENT_MICROSERVICE_URL", ""))
+
+
+def should_simulate_payment_collection(payment_mode, payload=None):
+    payload = payload or {}
+    if "simulate_collection" in payload:
+        return bool(payload.get("simulate_collection"))
+    return payment_mode != PaymentBatch.PaymentMode.STK
+
+
+def should_simulate_wallet_topup(payload=None):
+    payload = payload or {}
+    if "simulate_collection" in payload:
+        return bool(payload.get("simulate_collection"))
+    if "simulate" in payload:
+        return bool(payload.get("simulate"))
+    if not getattr(settings, "PAYMENT_MICROSERVICE_URL", ""):
+        return True
+    return not payment_microservice_dispatch_enabled()
+
+
+def payment_stk_phone_number(phone_number):
+    override = getattr(settings, "PAYMENT_MICROSERVICE_STK_PHONE_OVERRIDE", "")
+    if override:
+        normalized_override = normalize_phone_number(override)
+        logger.warning(
+            "payment_microservice.stk.phone_override.active original_phone=%s override_phone=%s",
+            phone_number,
+            normalized_override,
+        )
+        return normalized_override
+    return normalize_phone_number(phone_number)
+
+
+def dispatch_outbox_event_inline(event):
+    if not getattr(settings, "PAYMENT_MICROSERVICE_INLINE_DISPATCH", False):
+        logger.info(
+            "outbox.inline_dispatch.skipped event_id=%s topic=%s aggregate_type=%s aggregate_id=%s",
+            event.id,
+            event.topic,
+            event.aggregate_type,
+            event.aggregate_id,
+        )
+        return False
+    logger.info(
+        "outbox.inline_dispatch.start event_id=%s topic=%s aggregate_type=%s aggregate_id=%s payload=%s",
+        event.id,
+        event.topic,
+        event.aggregate_type,
+        event.aggregate_id,
+        event.payload,
     )
+    try:
+        from base.payment_microservice_executor import fail_instruction_event, process_outbox_event
+
+        event.status = OutboxEvent.Status.PROCESSING
+        event.attempts += 1
+        event.save(update_fields=["status", "attempts", "updated_at"])
+        process_outbox_event(event)
+        event.status = OutboxEvent.Status.DONE
+        event.last_error = ""
+        event.save(update_fields=["status", "last_error", "updated_at"])
+        logger.info("outbox.inline_dispatch.success event_id=%s topic=%s", event.id, event.topic)
+        return True
+    except Exception as exc:
+        event.status = OutboxEvent.Status.FAILED
+        event.last_error = str(exc)[:255]
+        event.save(update_fields=["status", "last_error", "updated_at"])
+        logger.exception("outbox.inline_dispatch.failed event_id=%s topic=%s error=%s", event.id, event.topic, exc)
+        fail_instruction_event(event, exc)
+        return False
 
 
-def amount_minor_to_provider_amount(amount_minor):
+def amount_minor_to_payment_amount(amount_minor):
     return str((Decimal(amount_minor) / Decimal("100")).quantize(Decimal("0.01")))
 
 
-def build_provider_reference(prefix, entity_id):
+def build_microservice_request_id(prefix, entity_id):
     return f"{prefix}-{str(entity_id).split('-')[0]}-{uuid.uuid4().hex[:8]}"
 
 
@@ -371,37 +405,25 @@ def ensure_wallet_balance(wallet):
 
 
 def _apply_wallet_balance_delta(wallet, *, current_delta=0, uncleared_delta=0, reserved_delta=0, available_delta=0):
-    reference = generate_transaction_reference()
-    return post_wallet_adjustment(
-        wallet,
-        amount_minor=available_delta or current_delta or reserved_delta or uncleared_delta,
-        reference=reference,
-        idempotency_key=_wallet_idempotency_key("balance-delta", reference),
-        metadata={
-            "current_delta": current_delta,
-            "uncleared_delta": uncleared_delta,
-            "reserved_delta": reserved_delta,
-            "available_delta": available_delta,
-        },
-    )
+    raise ValidationError("Direct wallet balance deltas are no longer supported. Use ledger execution profiles.")
 
 
 def ensure_user_wallets(user):
-    primary = get_or_create_user_wallet_account(
+    primary = get_or_create_user_account(
         user,
-        wallet_type=WalletAccount.WalletType.PRIMARY,
+        account_kind=Account.AccountKind.PRIMARY,
     )
     vault = None
     if can_access_individual_features(user):
-        vault = get_or_create_user_wallet_account(
+        vault = get_or_create_user_account(
             user,
-            wallet_type=WalletAccount.WalletType.VAULT,
+            account_kind=Account.AccountKind.VAULT,
         )
     return primary, vault
 
 
 def ensure_organization_wallet(organization):
-    return get_or_create_organization_wallet_account(organization)
+    return get_or_create_organization_account(organization)
 
 
 @transaction.atomic
@@ -410,7 +432,7 @@ def place_wallet_hold(wallet, amount_minor, *, reason, reference, expires_at=Non
         raise ValidationError("amount_minor must be greater than 0.")
     if wallet.available_balance_minor < amount_minor:
         raise InsufficientFundsError(wallet, amount_minor, wallet.available_balance_minor)
-    return reserve_wallet_funds(
+    return initiate_payout(
         wallet,
         amount_minor=amount_minor,
         reference=reference,
@@ -422,23 +444,15 @@ def place_wallet_hold(wallet, amount_minor, *, reason, reference, expires_at=Non
 
 @transaction.atomic
 def release_wallet_hold(hold_id):
-    hold = LedgerEntry.objects.select_related("account").get(id=hold_id)
-    return release_wallet_reserve(
-        hold.account,
-        amount_minor=hold.amount_minor,
-        reference=f"{hold.reference}-RELEASE",
-        idempotency_key=_wallet_idempotency_key("reserve-release", hold.reference),
-        description="Release wallet reserve",
-        metadata={"reserved_entry_id": str(hold.id)},
-    )
+    hold = LedgerTransactionRecord.objects.select_related("account").get(id=hold_id)
+    from ledger.services import fail_transaction
+
+    return fail_transaction(hold, reason="Reserve released")
 
 
 @transaction.atomic
 def post_uncleared_wallet_entry(wallet, amount_minor, *, entry_type, reference, metadata=None):
-    if not wallet.pk:
-        wallet = WalletAccount.objects.get(pk=wallet.pk)
-
-    return post_uncleared_top_up(
+    return initiate_pay_in(
         wallet,
         amount_minor=amount_minor,
         reference=reference,
@@ -450,8 +464,8 @@ def post_uncleared_wallet_entry(wallet, amount_minor, *, entry_type, reference, 
 
 @transaction.atomic
 def mark_wallet_entry_cleared(entry_id):
-    entry = LedgerEntry.objects.select_related("account").get(id=entry_id)
-    return clear_uncleared_top_up(entry)
+    entry = LedgerTransactionRecord.objects.select_related("account").get(id=entry_id)
+    return complete_pay_in(entry)
 
 
 def issue_token(user):
@@ -625,6 +639,8 @@ def register_user(payload):
             {
                 "name": payload["organization_name"],
                 "registration_number": payload.get("registration_number", ""),
+                "tax_identification_document": payload.get("tax_identification_document"),
+                "business_registration_certificate": payload.get("business_registration_certificate"),
                 "kyc_status": payload.get("kyc_status", Organization.KycStatus.PENDING),
                 "role": payload.get("organization_role", OrganizationMembership.Role.ADMIN),
             },
@@ -817,6 +833,8 @@ def create_organization(user, payload):
         name=name,
         slug=slug,
         registration_number=(payload.get("registration_number") or "").strip(),
+        tax_identification_document=payload.get("tax_identification_document"),
+        business_registration_certificate=payload.get("business_registration_certificate"),
         kyc_status=payload.get("kyc_status", Organization.KycStatus.PENDING),
     )
     OrganizationMembership.objects.create(user=user, organization=organization, role=role)
@@ -1571,13 +1589,12 @@ def top_up_wallet(user, payload):
     amount_minor = int(payload.get("amount_minor") or 0)
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
-
-    requested_wallet_type = payload.get("wallet_type", WalletAccount.WalletType.PRIMARY)
-    if requested_wallet_type not in WalletAccount.WalletType.values:
+    requested_wallet_type = payload.get("wallet_type", Account.AccountKind.PRIMARY)
+    if requested_wallet_type not in Account.AccountKind.values:
         raise ValidationError("Invalid wallet_type.")
 
     if payload.get("organization_id"):
-        if requested_wallet_type != WalletAccount.WalletType.PRIMARY:
+        if requested_wallet_type != Account.AccountKind.PRIMARY:
             raise ValidationError("Organization top-ups can only target the primary wallet.")
         organization = get_organization_for_user(
             user,
@@ -1587,67 +1604,32 @@ def top_up_wallet(user, payload):
         wallet = ensure_organization_wallet(organization)
     else:
         primary_wallet, vault_wallet = ensure_user_wallets(user)
-        if requested_wallet_type == WalletAccount.WalletType.VAULT:
+        if requested_wallet_type == Account.AccountKind.VAULT:
             if not vault_wallet:
                 raise ValidationError("Vault top-ups are only available for individual accounts.")
             wallet = vault_wallet
         else:
             wallet = primary_wallet
 
-    balance_before = wallet.available_balance_minor
-    reference = generate_transaction_reference()
-    post_wallet_account_top_up(
+    phone_number = payment_stk_phone_number(user.phone_number)
+    if not phone_number:
+        raise ValidationError("A valid phone number is required to initiate wallet top-up STK.")
+    PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_stk_push(
         wallet,
         amount_minor=amount_minor,
-        reference=reference,
-        idempotency_key=payload.get("idempotency_key") or _wallet_idempotency_key("top-up", reference),
-        description="Top up of funds",
+        phone_number=phone_number,
+        idempotency_key=payload.get("idempotency_key") or "",
         metadata={
             "description": "Top up of funds",
-            "provider": payload.get("provider", "simulated"),
+            "payment_service": payload.get("payment_service", "payment_microservice"),
             "wallet_type": wallet.wallet_type,
             "base_amount_minor": amount_minor,
             "fee_amount_minor": 0,
             "gross_amount_minor": amount_minor,
-            "status": "SUCCEEDED",
+            "status": "PROCESSING",
         },
     )
     wallet.refresh_from_db()
-    record_ledger_transaction(
-        reference,
-        "WALLET_TOP_UP",
-        [
-            {
-                "wallet": _wallet_movement_ref(wallet),
-                "account_code": _wallet_account_code(wallet),
-                "direction": LedgerMovement.Direction.DEBIT,
-                "amount_minor": amount_minor,
-                "currency": wallet.currency,
-                "balance_before_minor": balance_before,
-                "balance_after_minor": wallet.available_balance_minor,
-                "description": "Top up credited to wallet",
-            },
-            {
-                "account_code": "CLEARING:TOP_UP",
-                "direction": LedgerMovement.Direction.CREDIT,
-                "amount_minor": amount_minor,
-                "currency": wallet.currency,
-                "balance_before_minor": 0,
-                "balance_after_minor": 0,
-                "description": "Top up funding source",
-            },
-        ],
-        actor=user,
-        source=payload.get("provider", "simulated"),
-        description="Top up of funds",
-        metadata={"wallet_id": str(wallet.id), "wallet_type": wallet.wallet_type},
-    )
-    OutboxEvent.objects.create(
-        topic="wallet.topup.completed",
-        aggregate_type="wallet",
-        aggregate_id=wallet.id,
-        payload={"amount_minor": amount_minor, "wallet_type": wallet.wallet_type},
-    )
     return wallet
 
 
@@ -1655,16 +1637,16 @@ def list_wallet_ledger(user, organization_id=None, filters=None):
     filters = filters or {}
     if organization_id:
         organization = get_organization_for_user(user, organization_id)
-        wallets = WalletAccount.objects.filter(organization=organization)
+        wallets = Account.objects.filter(organization=organization)
     else:
-        wallets = WalletAccount.objects.filter(user=user)
+        wallets = Account.objects.filter(user=user)
 
-    if filters.get("wallet_type") in WalletAccount.WalletType.values:
-        wallets = wallets.filter(wallet_type=filters["wallet_type"])
+    if filters.get("wallet_type") in Account.AccountKind.values:
+        wallets = wallets.filter(account_kind=filters["wallet_type"])
 
-    queryset = LedgerEntry.objects.select_related("account").filter(account__in=wallets)
-    if filters.get("entry_type") in LedgerEntry.TransactionType.values:
-        queryset = queryset.filter(transaction_type=filters["entry_type"])
+    queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type").filter(account__in=wallets)
+    if filters.get("entry_type"):
+        queryset = queryset.filter(transaction_type__name=filters["entry_type"])
     return queryset.order_by("-created_at")
 
 
@@ -1679,9 +1661,6 @@ def transfer_to_vault(user, payload):
     primary_wallet, vault_wallet = ensure_user_wallets(user)
     if not vault_wallet:
         raise ValidationError("Vaulting is only available for individual accounts.")
-
-    primary_before = primary_wallet.available_balance_minor
-    vault_before = vault_wallet.available_balance_minor
 
     if direction == "TO_VAULT":
         if primary_wallet.available_balance_minor < amount_minor:
@@ -1698,73 +1677,22 @@ def transfer_to_vault(user, payload):
         debit_description = "Funds moved from vault"
         credit_description = "Funds returned to primary wallet"
 
-    reference = generate_transaction_reference()
-    post_wallet_adjustment(
+    transfer_between_accounts(
         debit_wallet,
-        amount_minor=-amount_minor,
-        reference=f"{reference}-DR",
-        idempotency_key=_wallet_idempotency_key("vault-debit", reference),
-        description=debit_description,
-        metadata={
-            "description": debit_description,
-            "direction": direction,
-            "base_amount_minor": amount_minor,
-            "fee_amount_minor": 0,
-            "gross_amount_minor": amount_minor,
-            "status": "SUCCEEDED",
-            "entry_type": "TRANSFER_TO_VAULT",
-        },
-    )
-    post_wallet_adjustment(
         credit_wallet,
         amount_minor=amount_minor,
-        reference=f"{reference}-CR",
-        idempotency_key=_wallet_idempotency_key("vault-credit", reference),
-        description=credit_description,
+        reference=generate_transaction_reference(),
+        description=debit_description,
         metadata={
-            "description": credit_description,
             "direction": direction,
             "base_amount_minor": amount_minor,
             "fee_amount_minor": 0,
             "gross_amount_minor": amount_minor,
             "status": "SUCCEEDED",
-            "entry_type": "TRANSFER_FROM_VAULT",
         },
     )
     primary_wallet.refresh_from_db()
     vault_wallet.refresh_from_db()
-    debit_before = primary_before if debit_wallet.id == primary_wallet.id else vault_before
-    credit_before = primary_before if credit_wallet.id == primary_wallet.id else vault_before
-    record_ledger_transaction(
-        reference,
-        "WALLET_TRANSFER",
-        [
-            {
-                "wallet": _wallet_movement_ref(debit_wallet),
-                "account_code": _wallet_account_code(debit_wallet),
-                "direction": LedgerMovement.Direction.CREDIT,
-                "amount_minor": amount_minor,
-                "currency": debit_wallet.currency,
-                "balance_before_minor": debit_before,
-                "balance_after_minor": debit_wallet.available_balance_minor,
-                "description": debit_description,
-            },
-            {
-                "wallet": _wallet_movement_ref(credit_wallet),
-                "account_code": _wallet_account_code(credit_wallet),
-                "direction": LedgerMovement.Direction.DEBIT,
-                "amount_minor": amount_minor,
-                "currency": credit_wallet.currency,
-                "balance_before_minor": credit_before,
-                "balance_after_minor": credit_wallet.available_balance_minor,
-                "description": credit_description,
-            },
-        ],
-        actor=user,
-        source="wallet",
-        description="Wallet-to-wallet transfer",
-        metadata={"direction": direction},
-    )
     return primary_wallet, vault_wallet
 
 
@@ -1782,14 +1710,11 @@ def withdraw_to_mpesa(user, payload):
     if primary_wallet.available_balance_minor < amount_minor:
         raise ValidationError("Insufficient wallet balance.")
 
-    balance_before = primary_wallet.available_balance_minor
-    reference = generate_transaction_reference()
-    entry = post_wallet_account_withdrawal(
+    payment_request = PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_payout(
         primary_wallet,
         amount_minor=amount_minor,
-        reference=reference,
-        idempotency_key=payload.get("idempotency_key") or _wallet_idempotency_key("withdrawal", reference),
-        description="Withdrawal of funds",
+        destination={"type": "MPESA", "phone_number": phone_number},
+        idempotency_key=payload.get("idempotency_key") or "",
         metadata={
             "description": "Withdrawal of funds",
             "destination_type": "MPESA",
@@ -1802,46 +1727,6 @@ def withdraw_to_mpesa(user, payload):
         },
     )
     primary_wallet.refresh_from_db()
-    record_ledger_transaction(
-        reference,
-        "WALLET_WITHDRAWAL",
-        [
-            {
-                "wallet": _wallet_movement_ref(primary_wallet),
-                "account_code": _wallet_account_code(primary_wallet),
-                "direction": LedgerMovement.Direction.CREDIT,
-                "amount_minor": amount_minor,
-                "currency": primary_wallet.currency,
-                "balance_before_minor": balance_before,
-                "balance_after_minor": primary_wallet.available_balance_minor,
-                "description": "Withdrawal debited from wallet",
-            },
-            {
-                "account_code": "CLEARING:MPESA_WITHDRAWAL",
-                "direction": LedgerMovement.Direction.DEBIT,
-                "amount_minor": amount_minor,
-                "currency": primary_wallet.currency,
-                "balance_before_minor": 0,
-                "balance_after_minor": 0,
-                "description": "Withdrawal payable to M-Pesa",
-            },
-        ],
-        actor=user,
-        source="mpesa",
-        description="Withdrawal of funds",
-        metadata={"ledger_entry_id": str(entry.id), "phone_number": phone_number},
-    )
-    OutboxEvent.objects.create(
-        topic="wallet.withdrawal.requested",
-        aggregate_type="wallet",
-        aggregate_id=primary_wallet.id,
-        payload={
-            "amount_minor": amount_minor,
-            "phone_number": phone_number,
-            "requires_owner_approval": user.payouts_require_owner_approval,
-            "ledger_entry_id": str(entry.id),
-        },
-    )
     AuditLog.objects.create(
         actor=user,
         action="wallet.withdrawal_requested",
@@ -1850,11 +1735,11 @@ def withdraw_to_mpesa(user, payload):
         metadata={
             "amount_minor": amount_minor,
             "phone_number": phone_number,
-            "ledger_entry_id": str(entry.id),
+            "transaction_id": str(payment_request.transaction_id),
             "requires_owner_approval": user.payouts_require_owner_approval,
         },
     )
-    return primary_wallet, entry
+    return primary_wallet, payment_request.transaction
 
 
 def _build_destination_from_payee(payee):
@@ -1918,7 +1803,7 @@ def _mark_batch_success(batch, actor=None):
         queue_notifications_for_user(
             actor,
             "PAYMENT_SUCCESS",
-            {"batch_id": str(batch.id), "total_amount_minor": batch.total_amount_minor},
+            _payment_success_notification_context(batch, actor),
             scheduled_for=timezone.now(),
         )
 
@@ -1966,6 +1851,34 @@ def record_batch_failure(batch, reason, status=PaymentBatch.Status.FAILED):
 
 def _batch_notification_user(batch):
     return batch.user or batch.approved_by or batch.submitted_by
+
+
+def _instruction_destination_phone(instruction):
+    destination = instruction.destination or {}
+    return destination.get("phone_number") or destination.get("account_number") or ""
+
+
+def _payment_success_notification_context(batch, user):
+    context = {
+        "batch_id": str(batch.id),
+        "total_amount_minor": batch.total_amount_minor,
+        "sender_name": user.full_name if user else "",
+        "sender_phone_number": user.phone_number if user else "",
+    }
+    instructions = list(batch.instructions.all()[:2])
+    if len(instructions) == 1:
+        instruction = instructions[0]
+        context.update(
+            {
+                "amount_minor": instruction.amount_minor,
+                "recipient_name": instruction.recipient_name,
+                "recipient_phone_number": _instruction_destination_phone(instruction),
+                "recipient_type": instruction.recipient_type,
+            }
+        )
+    else:
+        context["payout_count"] = batch.instructions.count()
+    return context
 
 
 @transaction.atomic
@@ -2029,7 +1942,7 @@ def pay_individual_due_items(user, payload):
             },
         )
         return batch
-    settle_batch(batch, actor=user, simulate_collection=payload.get("simulate_collection", True))
+    settle_batch(batch, actor=user, simulate_collection=should_simulate_payment_collection(payment_mode, payload))
     return batch
 
 
@@ -2269,7 +2182,7 @@ def approve_batch(user, batch_id):
             {"batch_id": str(batch.id), "organization_id": str(batch.organization_id)},
             scheduled_for=timezone.now(),
         )
-    settle_batch(batch, actor=user, simulate_collection=True)
+    settle_batch(batch, actor=user, simulate_collection=should_simulate_payment_collection(batch.payment_mode))
     AuditLog.objects.create(
         actor=user,
         action="batch.approved",
@@ -2362,6 +2275,14 @@ def reject_batch(user, batch_id, payload):
 
 @transaction.atomic
 def settle_batch(batch, actor, simulate_collection=True):
+    logger.info(
+        "payment.batch.settle.start batch_id=%s actor_id=%s payment_mode=%s simulate_collection=%s status=%s",
+        batch.id,
+        actor.id if actor else None,
+        batch.payment_mode,
+        simulate_collection,
+        batch.status,
+    )
     if batch.payment_mode == PaymentBatch.PaymentMode.WALLET:
         if batch.organization_id:
             wallet = ensure_organization_wallet(batch.organization)
@@ -2372,9 +2293,8 @@ def settle_batch(batch, actor, simulate_collection=True):
             _mark_batch_failure(batch, actor, "insufficient_wallet_balance")
             raise ValidationError("Insufficient wallet balance.")
 
-        balance_before = wallet.available_balance_minor
         reference = generate_transaction_reference()
-        post_wallet_account_withdrawal(
+        ledger_tx = initiate_payout(
             wallet,
             amount_minor=required_total,
             reference=reference,
@@ -2386,40 +2306,15 @@ def settle_batch(batch, actor, simulate_collection=True):
                 "base_amount_minor": batch.total_amount_minor,
                 "fee_amount_minor": batch.fee_amount_minor,
                 "gross_amount_minor": required_total,
-                "status": "PROCESSING" if provider_dispatch_enabled() else "SUCCEEDED",
+                "status": "PROCESSING" if payment_microservice_dispatch_enabled() and not simulate_collection else "SUCCEEDED",
             },
         )
+        batch.metadata["ledger_transaction_id"] = str(ledger_tx.id)
+        batch.save(update_fields=["metadata", "updated_at"])
+        if not payment_microservice_dispatch_enabled() or simulate_collection:
+            complete_payout(ledger_tx)
         wallet.refresh_from_db()
-        record_ledger_transaction(
-            reference,
-            "BATCH_DISBURSEMENT",
-            [
-                {
-                    "wallet": _wallet_movement_ref(wallet),
-                    "account_code": _wallet_account_code(wallet),
-                    "direction": LedgerMovement.Direction.CREDIT,
-                    "amount_minor": required_total,
-                    "currency": wallet.currency,
-                    "balance_before_minor": balance_before,
-                    "balance_after_minor": wallet.available_balance_minor,
-                    "description": "Batch disbursement debited from wallet",
-                },
-                {
-                    "account_code": "CLEARING:BATCH_DISBURSEMENT",
-                    "direction": LedgerMovement.Direction.DEBIT,
-                    "amount_minor": required_total,
-                    "currency": wallet.currency,
-                    "balance_before_minor": 0,
-                    "balance_after_minor": 0,
-                    "description": "Batch payout clearing account",
-                },
-            ],
-            actor=actor,
-            source="wallet",
-            description="Batch disbursement",
-            metadata={"batch_id": str(batch.id), "fee_amount_minor": batch.fee_amount_minor},
-        )
-        if provider_dispatch_enabled():
+        if payment_microservice_dispatch_enabled() and not simulate_collection:
             from_status = batch.status
             batch.status = PaymentBatch.Status.PROCESSING
             batch.save(update_fields=["status", "updated_at"])
@@ -2430,12 +2325,14 @@ def settle_batch(batch, actor, simulate_collection=True):
                 actor=actor,
                 from_status=from_status,
                 to_status=batch.status,
-                payload={"dispatch": "provider"},
+                payload={"dispatch": "payment_microservice"},
             )
             _queue_instruction_dispatches(batch)
+            logger.info("payment.batch.wallet.dispatch_queued batch_id=%s instruction_count=%s", batch.id, batch.instructions.count())
             return batch
     else:
         if not simulate_collection:
+            phone_number = payment_stk_phone_number(batch.user.phone_number if batch.user_id else "")
             from_status = batch.status
             batch.status = PaymentBatch.Status.PROCESSING
             batch.save(update_fields=["status", "updated_at"])
@@ -2448,14 +2345,29 @@ def settle_batch(batch, actor, simulate_collection=True):
                 to_status=batch.status,
                 payload={"dispatch": "collection.stk.requested"},
             )
-            OutboxEvent.objects.create(
+            event = OutboxEvent.objects.create(
                 topic="collection.stk.requested",
                 aggregate_type="payment_batch",
                 aggregate_id=batch.id,
                 payload={
                     "amount_minor": batch.total_amount_minor + batch.fee_amount_minor,
-                    "phone_number": batch.user.phone_number if batch.user_id else "",
+                    "phone_number": phone_number,
                 },
+            )
+            logger.info(
+                "payment.batch.stk.collection_queued batch_id=%s event_id=%s phone_number=%s amount_minor=%s",
+                batch.id,
+                event.id,
+                phone_number,
+                batch.total_amount_minor + batch.fee_amount_minor,
+            )
+            dispatch_outbox_event_inline(event)
+            logger.info(
+                "payment.batch.stk.collection_after_dispatch batch_id=%s event_id=%s event_status=%s last_error=%s",
+                batch.id,
+                event.id,
+                event.status,
+                event.last_error,
             )
             return batch
 
@@ -2464,8 +2376,8 @@ def settle_batch(batch, actor, simulate_collection=True):
     return batch
 
 
-def mark_batch_collection_complete(batch, provider_response):
-    batch.metadata["collection_response"] = provider_response
+def mark_batch_collection_complete(batch, microservice_response):
+    batch.metadata["collection_response"] = microservice_response
     batch.save(update_fields=["metadata", "updated_at"])
     _queue_instruction_dispatches(batch)
     return batch
@@ -2486,6 +2398,18 @@ def finalize_batch_from_instructions(batch):
         batch.status = PaymentBatch.Status.FAILED
     else:
         batch.status = PaymentBatch.Status.SUCCEEDED
+    ledger_transaction_id = (batch.metadata or {}).get("ledger_transaction_id")
+    if ledger_transaction_id:
+        try:
+            ledger_tx = LedgerTransactionRecord.objects.get(id=ledger_transaction_id)
+            if batch.status == PaymentBatch.Status.SUCCEEDED:
+                complete_payout(ledger_tx)
+            elif batch.status in {PaymentBatch.Status.FAILED, PaymentBatch.Status.PARTIAL}:
+                from ledger.services import fail_transaction
+
+                fail_transaction(ledger_tx, reason=f"Batch ended as {batch.status}")
+        except LedgerTransactionRecord.DoesNotExist:
+            logger.warning("payment.batch.ledger_transaction_missing batch_id=%s transaction_id=%s", batch.id, ledger_transaction_id)
     batch.processed_at = timezone.now()
     batch.save(update_fields=["status", "processed_at", "updated_at"])
     record_transaction_event(
@@ -2510,7 +2434,7 @@ def finalize_batch_from_instructions(batch):
         queue_notifications_for_user(
             user,
             "PAYMENT_SUCCESS",
-            {"batch_id": str(batch.id), "total_amount_minor": batch.total_amount_minor},
+            _payment_success_notification_context(batch, user),
             scheduled_for=timezone.now(),
         )
     elif batch.status in {PaymentBatch.Status.FAILED, PaymentBatch.Status.PARTIAL}:
@@ -2523,14 +2447,14 @@ def finalize_batch_from_instructions(batch):
     return batch.status
 
 
-def record_instruction_success(instruction, provider_response, provider_reference=""):
+def record_instruction_success(instruction, microservice_response, microservice_request_id=""):
     from_status = instruction.status
     instruction.status = PaymentInstruction.Status.SUCCEEDED
     instruction.failure_reason = ""
-    instruction.provider_reference = provider_reference or instruction.provider_reference
-    instruction.provider_response = provider_response or {}
+    instruction.microservice_request_id = microservice_request_id or instruction.microservice_request_id
+    instruction.microservice_response = microservice_response or {}
     instruction.save(
-        update_fields=["status", "failure_reason", "provider_reference", "provider_response", "updated_at"]
+        update_fields=["status", "failure_reason", "microservice_request_id", "microservice_response", "updated_at"]
     )
     record_transaction_event(
         "payment_instruction",
@@ -2538,27 +2462,27 @@ def record_instruction_success(instruction, provider_response, provider_referenc
         "payment_instruction.succeeded",
         from_status=from_status,
         to_status=instruction.status,
-        provider_reference=instruction.provider_reference,
-        payload={"provider_response": provider_response or {}},
+        microservice_request_id=instruction.microservice_request_id,
+        payload={"microservice_response": microservice_response or {}},
     )
     finalize_batch_from_instructions(instruction.batch)
     return instruction
 
 
-def record_instruction_failure(instruction, reason, provider_response=None):
+def record_instruction_failure(instruction, reason, microservice_response=None):
     from_status = instruction.status
     instruction.status = PaymentInstruction.Status.FAILED
     instruction.failure_reason = reason[:255]
-    instruction.provider_response = provider_response or {}
-    instruction.save(update_fields=["status", "failure_reason", "provider_response", "updated_at"])
+    instruction.microservice_response = microservice_response or {}
+    instruction.save(update_fields=["status", "failure_reason", "microservice_response", "updated_at"])
     record_transaction_event(
         "payment_instruction",
         instruction.id,
         "payment_instruction.failed",
         from_status=from_status,
         to_status=instruction.status,
-        provider_reference=instruction.provider_reference,
-        payload={"reason": reason, "provider_response": provider_response or {}},
+        microservice_request_id=instruction.microservice_request_id,
+        payload={"reason": reason, "microservice_response": microservice_response or {}},
     )
     finalize_batch_from_instructions(instruction.batch)
     return instruction
@@ -2696,7 +2620,7 @@ def quick_pay(user, payload):
         )
         return batch
 
-    settle_batch(batch, actor=user, simulate_collection=payload.get("simulate_collection", True))
+    settle_batch(batch, actor=user, simulate_collection=should_simulate_payment_collection(payment_mode, payload))
     return batch
 
 
@@ -2756,7 +2680,7 @@ def build_transaction_summary(user, organization_id=None, filters=None):
         instruction_queryset = instruction_queryset.filter(
             Q(recipient_name__icontains=term)
             | Q(external_reference__icontains=term)
-            | Q(provider_reference__icontains=term)
+            | Q(microservice_request_id__icontains=term)
         )
 
     date_from = _parse_date(filters["date_from"]) if filters.get("date_from") else timezone.localdate() - timedelta(days=30)
@@ -2764,9 +2688,9 @@ def build_transaction_summary(user, organization_id=None, filters=None):
     instruction_queryset = instruction_queryset.filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
 
     if organization_id:
-        wallet_queryset = LedgerEntry.objects.select_related("account").filter(account__organization_id=organization_id)
+        wallet_queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type").filter(account__organization_id=organization_id)
     else:
-        wallet_queryset = LedgerEntry.objects.select_related("account").filter(account__user=user)
+        wallet_queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type").filter(account__user=user)
     wallet_queryset = wallet_queryset.filter(created_at__date__gte=date_from, created_at__date__lte=date_to).order_by("created_at")
 
     summary = instruction_queryset.aggregate(
@@ -2776,11 +2700,11 @@ def build_transaction_summary(user, organization_id=None, filters=None):
     total_base = summary["total_base"] or 0
     total_fees = summary["total_fees"] or 0
     total_debits = total_base + total_fees
-    total_credits = sum(entry.amount_minor for entry in wallet_queryset if entry.transaction_type == LedgerEntry.TransactionType.TOP_UP)
+    total_credits = sum(entry.amount_minor for entry in wallet_queryset if entry.transaction_type.name == "WalletTopup")
     opening_balance = 0
     first_entry = wallet_queryset.first()
     if first_entry:
-        opening_balance = first_entry.balance_before_minor
+        opening_balance = first_entry.balance_after_minor
 
     transactions = [_serialize_activity_instruction(instruction) for instruction in instruction_queryset[:200]]
     return {
@@ -2818,8 +2742,8 @@ def build_dashboard(user, organization_id=None):
             month_key = (month_anchor.year, month_anchor.month)
             month_income = 0
             month_spend = 0
-            for entry in LedgerEntry.objects.filter(account__user=user, created_at__year=month_key[0], created_at__month=month_key[1]):
-                if entry.transaction_type == LedgerEntry.TransactionType.TOP_UP:
+            for entry in LedgerTransactionRecord.objects.select_related("transaction_type").filter(account__user=user, created_at__year=month_key[0], created_at__month=month_key[1]):
+                if entry.transaction_type.name == "WalletTopup":
                     month_income += entry.amount_minor
             for instruction in personal_instruction_queryset.filter(created_at__year=month_key[0], created_at__month=month_key[1]):
                 month_spend += instruction.amount_minor + instruction.fee_amount_minor

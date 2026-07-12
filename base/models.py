@@ -22,6 +22,8 @@ class Organization(TimestampedModel):
     name = models.CharField(max_length=255)
     slug = models.SlugField(max_length=255, unique=True)
     registration_number = models.CharField(max_length=64, blank=True)
+    tax_identification_document = models.FileField(upload_to="organization_kyc/tax_identification/", blank=True)
+    business_registration_certificate = models.FileField(upload_to="organization_kyc/business_registration/", blank=True)
     kyc_status = models.CharField(max_length=16, choices=KycStatus.choices, default=KycStatus.PENDING)
     default_currency = models.CharField(max_length=3, default="KES")
     push_notifications_enabled = models.BooleanField(default=True)
@@ -76,158 +78,6 @@ class OrganizationInvite(TimestampedModel):
         ]
 
 
-class Wallet(TimestampedModel):
-    class OwnerType(models.TextChoices):
-        USER = "USER", "User"
-        ORGANIZATION = "ORGANIZATION", "Organization"
-
-    class WalletType(models.TextChoices):
-        PRIMARY = "PRIMARY", "Primary"
-        VAULT = "VAULT", "Vault"
-
-    id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
-    owner_type = models.CharField(max_length=20, choices=OwnerType.choices)
-    wallet_type = models.CharField(max_length=20, choices=WalletType.choices, default=WalletType.PRIMARY)
-    user = models.ForeignKey("eusers.User", on_delete=models.CASCADE, null=True, blank=True, related_name="wallets")
-    organization = models.ForeignKey(
-        "base.Organization",
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="wallets",
-    )
-    currency = models.CharField(max_length=3, default="KES")
-    available_balance_minor = models.BigIntegerField(default=0)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["user", "wallet_type"],
-                condition=models.Q(user__isnull=False),
-                name="uniq_user_wallet_type",
-            ),
-            models.UniqueConstraint(
-                fields=["organization", "wallet_type"],
-                condition=models.Q(organization__isnull=False),
-                name="uniq_org_wallet_type",
-            ),
-        ]
-
-    def __str__(self):
-        owner = self.user.full_name if self.user_id else self.organization.name
-        return f"{owner} {self.wallet_type}"
-
-
-class WalletBalance(TimestampedModel):
-    wallet = models.OneToOneField("base.Wallet", on_delete=models.PROTECT, related_name="balance")
-    current_balance_minor = models.BigIntegerField(default=0)
-    uncleared_balance_minor = models.BigIntegerField(default=0)
-    reserved_balance_minor = models.BigIntegerField(default=0)
-    available_balance_minor = models.BigIntegerField(default=0)
-
-    # class Meta:
-    #     constraints = [
-    #         models.CheckConstraint(check=models.Q(available_balance_minor__gte=0), name="wallet_balance_available_not_negative"),
-    #     ]
-
-
-class WalletLedgerEntry(TimestampedModel):
-    class EntryType(models.TextChoices):
-        TOP_UP = "TOP_UP", "Top Up"
-        TRANSFER_TO_VAULT = "TRANSFER_TO_VAULT", "Transfer To Vault"
-        TRANSFER_FROM_VAULT = "TRANSFER_FROM_VAULT", "Transfer From Vault"
-        DISBURSEMENT = "DISBURSEMENT", "Disbursement"
-        ADJUSTMENT = "ADJUSTMENT", "Adjustment"
-
-    class ClearingStatus(models.TextChoices):
-        CLEARED = "CLEARED", "Cleared"
-        UNCLEARED = "UNCLEARED", "Uncleared"
-
-    id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
-    wallet = models.ForeignKey("base.Wallet", on_delete=models.CASCADE, related_name="ledger_entries")
-    entry_type = models.CharField(max_length=32, choices=EntryType.choices)
-    amount_minor = models.BigIntegerField()
-    balance_after_minor = models.BigIntegerField()
-    reference = models.CharField(max_length=255)
-    clearing_status = models.CharField(max_length=16, choices=ClearingStatus.choices, default=ClearingStatus.CLEARED)
-    cleared_at = models.DateTimeField(null=True, blank=True)
-    metadata = models.JSONField(default=dict, blank=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["wallet", "created_at"]),
-            models.Index(fields=["wallet", "clearing_status"]),
-        ]
-
-
-class WalletHold(TimestampedModel):
-    class Status(models.TextChoices):
-        ACTIVE = "ACTIVE", "Active"
-        RELEASED = "RELEASED", "Released"
-        CAPTURED = "CAPTURED", "Captured"
-        EXPIRED = "EXPIRED", "Expired"
-
-    id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
-    wallet = models.ForeignKey("base.Wallet", on_delete=models.PROTECT, related_name="holds")
-    amount_minor = models.BigIntegerField()
-    currency = models.CharField(max_length=3, default="KES")
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
-    reason = models.CharField(max_length=64)
-    reference = models.CharField(max_length=64, unique=True)
-    related_transaction = models.ForeignKey("base.LedgerTransaction", null=True, blank=True, on_delete=models.SET_NULL, related_name="capturing_holds")
-    metadata = models.JSONField(default=dict, blank=True)
-    expires_at = models.DateTimeField(null=True, blank=True)
-    resolved_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        # constraints = [
-        #     models.CheckConstraint(check=models.Q(amount_minor__gt=0), name="wallet_hold_amount_positive"),
-        # ]
-        indexes = [
-            models.Index(fields=["wallet", "status"]),
-            models.Index(fields=["status", "expires_at"]),
-        ]
-
-
-class LedgerTransaction(TimestampedModel):
-    class Status(models.TextChoices):
-        POSTED = "POSTED", "Posted"
-        REVERSED = "REVERSED", "Reversed"
-
-    id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
-    reference = models.CharField(max_length=255, unique=True)
-    transaction_type = models.CharField(max_length=64)
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.POSTED)
-    actor = models.ForeignKey("eusers.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="ledger_transactions")
-    source = models.CharField(max_length=64, blank=True)
-    description = models.CharField(max_length=255, blank=True)
-    metadata = models.JSONField(default=dict, blank=True)
-
-
-class LedgerMovement(TimestampedModel):
-    class Direction(models.TextChoices):
-        DEBIT = "DR", "Debit"
-        CREDIT = "CR", "Credit"
-
-    id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
-    transaction = models.ForeignKey("base.LedgerTransaction", on_delete=models.CASCADE, related_name="movements")
-    wallet = models.ForeignKey("base.Wallet", on_delete=models.SET_NULL, null=True, blank=True, related_name="ledger_movements")
-    account_code = models.CharField(max_length=64)
-    direction = models.CharField(max_length=2, choices=Direction.choices)
-    amount_minor = models.BigIntegerField()
-    currency = models.CharField(max_length=3, default="KES")
-    balance_before_minor = models.BigIntegerField()
-    balance_after_minor = models.BigIntegerField()
-    description = models.CharField(max_length=255, blank=True)
-    metadata = models.JSONField(default=dict, blank=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["wallet", "created_at"], name="ledger_movement_wallet_created"),
-            models.Index(fields=["account_code", "created_at"], name="ledger_move_acct_created"),
-        ]
-
-
 class IdempotencyRecord(TimestampedModel):
     class Status(models.TextChoices):
         PROCESSING = "PROCESSING", "Processing"
@@ -259,7 +109,7 @@ class TransactionEvent(TimestampedModel):
     from_status = models.CharField(max_length=32, blank=True)
     to_status = models.CharField(max_length=32, blank=True)
     actor = models.ForeignKey("eusers.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="transaction_events")
-    provider_reference = models.CharField(max_length=120, blank=True)
+    microservice_request_id = models.CharField(max_length=120, blank=True)
     payload = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -462,8 +312,8 @@ class PaymentInstruction(TimestampedModel):
     fee_amount_minor = models.BigIntegerField(default=0)
     category = models.CharField(max_length=64, default="general")
     external_reference = models.CharField(max_length=120, blank=True)
-    provider_reference = models.CharField(max_length=120, blank=True)
-    provider_response = models.JSONField(default=dict, blank=True)
+    microservice_request_id = models.CharField(max_length=120, blank=True)
+    microservice_response = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     failure_reason = models.CharField(max_length=255, blank=True)
 

@@ -68,13 +68,18 @@ class _StatementPdf:
 
     def render(self, title, customer_name, mobile_number, email, period, requested_at, summary, transactions):
         rows = self._rows(summary, transactions)
-        chunks = [rows[:25]] + [rows[index:index + 33] for index in range(25, len(rows), 33)]
+        first_page_rows = 17
+        continued_page_rows = 24
+        chunks = [rows[:first_page_rows]] + [
+            rows[index:index + continued_page_rows]
+            for index in range(first_page_rows, len(rows), continued_page_rows)
+        ]
         if not chunks:
             chunks = [[]]
         for page_number, chunk in enumerate(chunks, start=1):
             self._new_page()
             self._header(title, customer_name, mobile_number, email, period, requested_at, page_number)
-            start_y = 605 if page_number == 1 else 705
+            start_y = 468 if page_number == 1 else 600
             if page_number == 1:
                 self._summary(summary)
             self._transaction_table(chunk, start_y)
@@ -147,7 +152,7 @@ class _StatementPdf:
         self._text(requested_at, 205, 644, 8, bold=True)
         self._stamp(requested_at, title)
         if page_number > 1:
-            self._text("DETAILED STATEMENT CONTINUED", 210, 725, 11, bold=True, color=self.red)
+            self._text("DETAILED STATEMENT CONTINUED", 210, 620, 11, bold=True, color=self.red)
 
     def _stamp(self, requested_at, title):
         self._rect(432, 652, 112, 62, stroke=self.red, width=1.4)
@@ -172,11 +177,11 @@ class _StatementPdf:
             self._text(label, 84, y - 10, 6.5)
             self._text(value, 306, y - 10, 6.5)
             y -= 14
-        self._text("DETAILED STATEMENT", 252, 490, 11, bold=True, color=self.red)
+        self._text("DETAILED STATEMENT", 252, 488, 11, bold=True, color=self.red)
 
     def _transaction_table(self, rows, top_y):
-        headers = ["Transaction ID", "Transaction Date", "Description", "Status", "Amount", "Type", "Balance"]
-        widths = [70, 66, 132, 62, 58, 54, 58]
+        headers = ["Transaction ID", "Transaction Date", "Description", "Status", "Principal", "Fee", "Gross", "Balance"]
+        widths = [62, 62, 116, 56, 50, 45, 50, 59]
         x = 48
         y = top_y
         self._fill_rect(x, y - 18, sum(widths), 18, self.red)
@@ -189,12 +194,21 @@ class _StatementPdf:
         for row in rows:
             cursor = x
             self._rect(x, y - row_h, sum(widths), row_h, stroke=self.red, width=0.5)
-            values = [row["id"], row["date"], row["description"], row["status"], row["amount"], row["direction"], row["balance"]]
+            values = [
+                row["id"],
+                row["date"],
+                row["description"],
+                row["status"],
+                row["principal"],
+                row["fee"],
+                row["gross"],
+                row["balance"],
+            ]
             for value, width in zip(values, widths):
                 self._line(cursor, y, cursor, y - row_h, self.red, 0.4)
-                self._text(str(value)[:34], cursor + 3, y - 9, 5.2)
-                if width > 70 and len(str(value)) > 34:
-                    self._text(str(value)[34:68], cursor + 3, y - 17, 5.2)
+                self._text(str(value)[:30], cursor + 3, y - 9, 4.8)
+                if width > 70 and len(str(value)) > 30:
+                    self._text(str(value)[30:60], cursor + 3, y - 17, 4.8)
                 cursor += width
             self._line(cursor, y, cursor, y - row_h, self.red, 0.4)
             y -= row_h
@@ -203,16 +217,19 @@ class _StatementPdf:
         balance = summary.get("opening_balance_minor", 0)
         rows = []
         for item in transactions:
-            amount = int(item.get("gross_amount_minor") or item.get("amount_minor") or 0)
+            principal = int(item.get("base_amount_minor") or item.get("amount_minor") or 0)
+            fee = int(item.get("fee_amount_minor") or 0)
+            amount = int(item.get("gross_amount_minor") or principal + fee)
             balance -= amount
             created = item.get("created_at", "")
             rows.append({
-                "id": str(item.get("id") or item.get("instruction_id") or "-")[:10].upper(),
+                "id": str(item.get("id") or item.get("instruction_id") or "-")[:8].upper(),
                 "date": _pretty_date(created[:10]) + (f" {created[11:16]}" if len(created) >= 16 else ""),
                 "description": item.get("description") or f"Sent to {item.get('recipient_name') or 'recipient'}",
                 "status": str(item.get("status") or "SUCCEEDED").replace("_", " ").title(),
-                "amount": _money(amount),
-                "direction": "Debit",
+                "principal": _money(principal),
+                "fee": _money(fee),
+                "gross": _money(amount),
                 "balance": _money(balance),
             })
         return rows

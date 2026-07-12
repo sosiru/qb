@@ -1,9 +1,12 @@
 import hashlib
 import json
 import logging
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from functools import wraps
 
 from django.http import JsonResponse
+from django.http.request import QueryDict
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -20,13 +23,92 @@ def json_error(message, status=400, extra=None):
     return JsonResponse(payload, status=status)
 
 
-def parse_json(request):
-    if not request.body:
+def _querydict_to_dict(querydict):
+    if not isinstance(querydict, QueryDict):
+        return dict(querydict or {})
+    data = {}
+    for key in querydict.keys():
+        values = querydict.getlist(key)
+        data[key] = values if len(values) > 1 else querydict.get(key)
+    return data
+
+
+def get_request_data(request):
+    """
+    Return request data as a plain dict across JSON, form, multipart, and query-string requests.
+
+    Raises ValueError for invalid JSON so API views can return a 400 instead of silently
+    accepting a malformed payload.
+    """
+    if request is None:
         return {}
+
+    method = (getattr(request, "method", "") or "").upper()
+    content_type = (getattr(request, "content_type", "") or request.META.get("CONTENT_TYPE", "") or "").split(";", 1)[0].strip().lower()
+
+    if method == "GET":
+        return _querydict_to_dict(getattr(request, "GET", {}))
+
+    if content_type == "application/json" or content_type.endswith("+json"):
+        body = getattr(request, "body", b"") or b""
+        if not body:
+            return {}
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else {"data": parsed}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.exception("get_request_data.invalid_json path=%s", getattr(request, "path", ""))
+            raise ValueError("Invalid JSON body.") from exc
+
+    if content_type in {"multipart/form-data", "application/x-www-form-urlencoded"}:
+        return _querydict_to_dict(getattr(request, "POST", {}))
+
+    body = getattr(request, "body", b"") or b""
+    if body:
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else {"data": parsed}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.info("get_request_data.unparsed_body path=%s content_type=%s", getattr(request, "path", ""), content_type)
+
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        post_data = _querydict_to_dict(getattr(request, "POST", {}))
+        if post_data:
+            return post_data
+
+    return {}
+
+
+def get_clean_request_data(request):
+    data = dict(get_request_data(request))
+    for key in ("target", "source_ip", "token", "system", "client_id", "client_secret"):
+        data.pop(key, None)
+    return data
+
+
+def json_super_serializer(obj):
+    if isinstance(obj, datetime):
+        try:
+            return obj.strftime("%d/%m/%Y %I:%M:%S %p")
+        except Exception:
+            return str(obj)
+    if isinstance(obj, date):
+        try:
+            return obj.strftime("%d/%m/%Y")
+        except Exception:
+            return str(obj)
+    if isinstance(obj, (Decimal, float)):
+        return str("{:,}".format(round(Decimal(obj), 2)))
+    if isinstance(obj, timedelta):
+        return obj.days
+    return str(obj)
+
+
+def parse_json(request):
     try:
-        return json.loads(request.body.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError("Invalid JSON body.") from exc
+        return get_request_data(request)
+    except ValueError:
+        raise
 
 
 def authenticate_request(request):

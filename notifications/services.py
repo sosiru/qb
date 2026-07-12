@@ -11,7 +11,7 @@ from django.template import Template, Context
 from django.utils import timezone
 
 from base.models import PaymentSchedule
-from ledger.models import WalletAccount
+from ledger.models import Account
 
 from .models import NotificationEvent, NotificationTemplate
 
@@ -190,6 +190,11 @@ def _event_view_model(event):
         details = [
             ("Batch ID", context.get("batch_id", "")),
             ("Amount", _money_minor(amount)),
+            ("Sent by", context.get("sender_name", "")),
+            ("Sender phone", context.get("sender_phone_number", "")),
+            ("Recipient", context.get("recipient_name", "")),
+            ("Recipient phone", context.get("recipient_phone_number", "")),
+            ("Payouts", context.get("payout_count", "")),
         ]
     elif event.event_type == "PAYMENT_FAILURE":
         title = "Payment needs attention"
@@ -348,7 +353,7 @@ def create_due_today_notifications(run_date=None):
         if not user:
             continue
         if user.id not in user_rollups:
-            wallet = WalletAccount.objects.filter(user=user, wallet_type=WalletAccount.WalletType.PRIMARY).first()
+            wallet = Account.objects.filter(user=user, account_kind=Account.AccountKind.PRIMARY).first()
             user_rollups[user.id] = {
                 "user": user,
                 "total_amount_minor": 0,

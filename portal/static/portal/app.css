@@ -7,10 +7,13 @@
   --muted: #64748b;
   --primary: #1565d8;
   --primary-strong: #0d47a1;
+  --brand-700: #1565d8;
+  --brand-800: #0d47a1;
   --success: #0f9d58;
   --warning: #d97706;
   --danger: #dc2626;
   --shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
+  --shadow-pop: 0 14px 30px rgba(13, 71, 161, 0.28);
   --radius: 8px;
 }
 
@@ -407,6 +410,15 @@ th {
   background: linear-gradient(135deg, var(--primary-strong), var(--primary));
   border-color: transparent;
   color: #fff;
+}
+
+.btn-primary {
+  background: linear-gradient(155deg, var(--brand-700), var(--brand-800));
+  color: #fff;
+  padding: 12px 18px;
+  font-size: 14px;
+  width: 100%;
+  box-shadow: var(--shadow-pop);
 }
 
 .button.subtle {

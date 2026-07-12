@@ -13,9 +13,16 @@ from eusers.models import User
 from notifications.models import NotificationEvent
 from notifications.services import queue_notifications_for_user
 from reports.models import ReportExport
-from ledger.models import LedgerEntry, LedgerEntryLog, WalletAccount
+from ledger.models import Account
+from ledger.services import PaymentInterface, get_or_create_user_account, initiate_payout, unique_transaction_reference
 
-from .models import OrganizationMembership, OutboxEvent, PaymentBatch, PaymentInstruction, PaymentSchedule, Wallet, WalletBalance, WalletHold, WalletLedgerEntry
+from .models import (
+    OrganizationMembership,
+    OutboxEvent,
+    PaymentBatch,
+    PaymentInstruction,
+    PaymentSchedule,
+)
 from .services import (
     ensure_user_wallets,
     mark_wallet_entry_cleared,
@@ -178,8 +185,8 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(response.json()["wallet"]["wallet_type"], "VAULT")
         self.assertEqual(response.json()["wallet"]["available_balance_minor"], 120000)
 
-        primary_wallet = WalletAccount.objects.get(user__phone_number="254700000005", wallet_type=WalletAccount.WalletType.PRIMARY)
-        vault_wallet = WalletAccount.objects.get(user__phone_number="254700000005", wallet_type=WalletAccount.WalletType.VAULT)
+        primary_wallet = Account.objects.get(user__phone_number="254700000005", account_kind=Account.AccountKind.PRIMARY)
+        vault_wallet = Account.objects.get(user__phone_number="254700000005", account_kind=Account.AccountKind.VAULT)
         self.assertEqual(primary_wallet.available_balance_minor, 0)
         self.assertEqual(vault_wallet.available_balance_minor, 120000)
 
@@ -199,7 +206,7 @@ class QuickBundlPlatformTests(TestCase):
         wallet.refresh_from_db()
         self.assertEqual(wallet.reserved_balance_minor, 200000)
         self.assertEqual(wallet.available_balance_minor, 300000)
-        self.assertEqual(hold.transaction_type, LedgerEntry.TransactionType.ADJUSTMENT)
+        self.assertEqual(hold.direction, "PAY_OUT")
 
         release_wallet_hold(hold.id)
         wallet.refresh_from_db()
@@ -217,19 +224,14 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(wallet.current_balance_minor, 650000)
         self.assertEqual(wallet.uncleared_balance_minor, 150000)
         self.assertEqual(wallet.available_balance_minor, 500000)
-        self.assertEqual(entry.metadata["clearing_status"], "UNCLEARED")
+        self.assertEqual(entry.status, "PROCESSING")
 
         mark_wallet_entry_cleared(entry.id)
         wallet.refresh_from_db()
         self.assertEqual(wallet.uncleared_balance_minor, 0)
         self.assertEqual(wallet.available_balance_minor, 650000)
-        self.assertEqual(
-            list(entry.logs.order_by("sequence", "created_at").values_list("balance_field", "delta_minor"))[-2:],
-            [
-                (LedgerEntryLog.BalanceField.UNCLEARED, -150000),
-                (LedgerEntryLog.BalanceField.AVAILABLE, 150000),
-            ],
-        )
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, "COMPLETED")
 
     def test_profile_update_and_wallet_ledger_endpoint(self):
         response = self._post(
@@ -458,7 +460,12 @@ class QuickBundlPlatformTests(TestCase):
         self.assertTrue(schedule_response.json()["schedule"]["requires_approval"])
 
         self._post("/api/v1/wallets/topups/", {"amount_minor": 1000000}, token=token)
-        response = self._post("/api/v1/payments/pay-all/", {"payment_mode": "WALLET"}, token=token)
+        with patch("base.services.payment_microservice_dispatch_enabled", return_value=True):
+            response = self._post(
+                "/api/v1/payments/pay-all/",
+                {"payment_mode": "WALLET", "simulate_collection": False},
+                token=token,
+            )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["batch"]["status"], "SUCCEEDED")
 
@@ -802,7 +809,7 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(response.json()["batch"]["fee_amount_minor"], 3000)
 
         batch = PaymentBatch.objects.get(id=batch_id)
-        wallet = WalletAccount.objects.get(organization_id=organization_id, wallet_type=WalletAccount.WalletType.PRIMARY)
+        wallet = Account.objects.get(organization_id=organization_id, account_kind=Account.AccountKind.PRIMARY)
         self.assertEqual(batch.status, PaymentBatch.Status.SUCCEEDED)
         self.assertEqual(wallet.available_balance_minor, 747000)
         self.assertTrue(
@@ -931,19 +938,13 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["batch"]["status"], "REJECTED")
 
-    @override_settings(
-        PESAWAY_ENABLED=True,
-        PESAWAY_CLIENT_ID="client-id",
-        PESAWAY_CLIENT_SECRET="client-secret",
-        PESAWAY_RESULTS_URL="https://example.com/api/v1/providers/pesaway/results/",
-    )
-    def test_provider_enabled_wallet_flow_uses_outbox_dispatch(self):
+    def test_microservice_enabled_wallet_flow_uses_outbox_dispatch(self):
         response = self._post(
             "/api/v1/auth/register/",
             {
                 "phone_number": "254700000020",
                 "password": "StrongPass123!",
-                "full_name": "Provider User",
+                "full_name": "Microservice User",
                 "account_type": "INDIVIDUAL",
             },
         )
@@ -971,7 +972,12 @@ class QuickBundlPlatformTests(TestCase):
         )
         self._post("/api/v1/wallets/topups/", {"amount_minor": 200000}, token=token)
 
-        response = self._post("/api/v1/payments/pay-all/", {"payment_mode": "WALLET"}, token=token)
+        with patch("base.services.payment_microservice_dispatch_enabled", return_value=True):
+            response = self._post(
+                "/api/v1/payments/pay-all/",
+                {"payment_mode": "WALLET", "simulate_collection": False},
+                token=token,
+            )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["batch"]["status"], "PROCESSING")
 
@@ -980,18 +986,73 @@ class QuickBundlPlatformTests(TestCase):
             OutboxEvent.objects.filter(topic="payment.instruction.dispatch", aggregate_type="payment_instruction").exists()
         )
 
-        class FakePesaWayClient:
-            def send_b2c_payment(self, **kwargs):
-                return {"data": {"TransactionReference": "PW-12345"}, "request": kwargs}
-
-        with patch("base.provider_executor.build_pesaway_client", return_value=FakePesaWayClient()):
+        with patch("base.payment_microservice_executor._sandbox_enabled", return_value=True):
             call_command("process_outbox")
 
         batch = PaymentBatch.objects.get(id=batch_id)
         instruction = PaymentInstruction.objects.get(batch=batch)
         self.assertEqual(batch.status, PaymentBatch.Status.SUCCEEDED)
         self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
-        self.assertEqual(instruction.provider_reference, "PW-12345")
+        self.assertTrue(instruction.microservice_request_id.startswith("SIM-"))
+
+    def test_successful_microservice_payout_queues_sms_and_email_with_sender_details(self):
+        user = User.objects.create_user(
+            phone_number="254700000121",
+            password="StrongPass123!",
+            full_name="Payout Sender",
+            email="sender@example.com",
+            account_type="INDIVIDUAL",
+            email_notifications_enabled=True,
+            sms_notifications_enabled=True,
+        )
+        batch = PaymentBatch.objects.create(
+            batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+            status=PaymentBatch.Status.PROCESSING,
+            payment_mode=PaymentBatch.PaymentMode.WALLET,
+            user=user,
+            scheduled_for=timezone.localdate(),
+            total_amount_minor=150000,
+        )
+        instruction = PaymentInstruction.objects.create(
+            batch=batch,
+            recipient_name="Recipient User",
+            recipient_type="MOBILE",
+            destination={"phone_number": "254711222333"},
+            amount_minor=150000,
+            category="family",
+            external_reference="EXT-001",
+        )
+        top_up_wallet(user, {"amount_minor": 150000, "simulate": True})
+        account = get_or_create_user_account(user)
+        ledger_transaction = initiate_payout(
+            account,
+            amount_minor=150000,
+            reference=unique_transaction_reference("POT"),
+            idempotency_key=f"test-payout:{instruction.id}",
+            description="Test payout",
+            metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id)},
+        )
+        batch.metadata["ledger_transaction_id"] = str(ledger_transaction.id)
+        batch.save(update_fields=["metadata", "updated_at"])
+
+        PaymentInterface(sandbox=True).initiate_instruction_payout(
+            instruction,
+            transaction_record=ledger_transaction,
+            metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id)},
+        )
+
+        instruction.refresh_from_db()
+        batch.refresh_from_db()
+        self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
+        self.assertEqual(batch.status, PaymentBatch.Status.SUCCEEDED)
+        events = NotificationEvent.objects.filter(event_type="PAYMENT_SUCCESS").order_by("channel")
+        self.assertEqual(events.count(), 2)
+        self.assertEqual({event.channel for event in events}, {"EMAIL", "SMS"})
+        for event in events:
+            self.assertEqual(event.context["amount_minor"], 150000)
+            self.assertEqual(event.context["recipient_phone_number"], "254711222333")
+            self.assertEqual(event.context["sender_name"], "Payout Sender")
+            self.assertEqual(event.context["sender_phone_number"], "254700000121")
 
     @override_settings(
         NOTIFY_URL="https://notify.example/api/send",

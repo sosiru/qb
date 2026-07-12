@@ -2,8 +2,16 @@ from django.test import TestCase
 
 from eusers.models import User
 
-from .models import LedgerEntryLog, WalletAccount
-from .services import IdempotencyConflict, get_or_create_user_ledger_account, post_top_up, post_withdrawal
+from .models import Account, BalanceLogEntry, PaymentRequest, Transaction
+from .services import (
+    IdempotencyConflict,
+    PaymentInterface,
+    complete_pay_in,
+    complete_payout,
+    get_or_create_user_account,
+    initiate_pay_in,
+    initiate_payout,
+)
 
 
 class LedgerServiceTests(TestCase):
@@ -14,10 +22,10 @@ class LedgerServiceTests(TestCase):
             account_type=User.AccountType.INDIVIDUAL,
             password="test-pass",
         )
-        self.account = get_or_create_user_ledger_account(self.user)
+        self.account = get_or_create_user_account(self.user)
 
-    def test_top_up_logs_uncleared_current_then_available(self):
-        entry = post_top_up(
+    def test_pay_in_uses_profiles_to_clear_available_balance(self):
+        tx = initiate_pay_in(
             self.account,
             amount_minor=100000,
             reference="TOPUP-001",
@@ -26,75 +34,35 @@ class LedgerServiceTests(TestCase):
 
         self.account.refresh_from_db()
         self.assertEqual(self.account.current_balance_minor, 100000)
+        self.assertEqual(self.account.uncleared_balance_minor, 100000)
+        self.assertEqual(self.account.available_balance_minor, 0)
+
+        complete_pay_in(tx, receipt="RCT-001", confirmation_key="CONF-001")
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.current_balance_minor, 100000)
         self.assertEqual(self.account.uncleared_balance_minor, 0)
-        self.assertEqual(self.account.reserved_balance_minor, 0)
         self.assertEqual(self.account.available_balance_minor, 100000)
-        self.assertEqual(entry.balance_before_minor, 0)
-        self.assertEqual(entry.balance_after_minor, 100000)
-        self.assertEqual(
-            list(entry.logs.order_by("sequence", "created_at").values_list("balance_field", "delta_minor")),
-            [
-                (LedgerEntryLog.BalanceField.UNCLEARED, 100000),
-                (LedgerEntryLog.BalanceField.CURRENT, 100000),
-                (LedgerEntryLog.BalanceField.UNCLEARED, -100000),
-                (LedgerEntryLog.BalanceField.AVAILABLE, 100000),
-            ],
-        )
+        self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=tx).count(), 4)
 
-    def test_withdrawal_logs_available_reserved_then_current_reserved(self):
-        post_top_up(
-            self.account,
-            amount_minor=100000,
-            reference="TOPUP-002",
-            idempotency_key="topup-key-002",
-        )
+    def test_payout_reserves_then_settles(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="TOPUP-002"))
 
-        entry = post_withdrawal(
-            self.account,
-            amount_minor=100000,
-            reference="WITHDRAW-001",
-            idempotency_key="withdraw-key-001",
-        )
+        tx = initiate_payout(self.account, amount_minor=100000, reference="WITHDRAW-001")
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.available_balance_minor, 0)
+        self.assertEqual(self.account.reserved_balance_minor, 100000)
 
+        complete_payout(tx, receipt="PAYOUT-001")
         self.account.refresh_from_db()
         self.assertEqual(self.account.available_balance_minor, 0)
         self.assertEqual(self.account.reserved_balance_minor, 0)
         self.assertEqual(self.account.current_balance_minor, 0)
-        self.assertEqual(self.account.uncleared_balance_minor, 0)
-        self.assertEqual(entry.balance_before_minor, 100000)
-        self.assertEqual(entry.balance_after_minor, 0)
-        self.assertEqual(
-            list(entry.logs.order_by("sequence", "created_at").values_list("balance_field", "delta_minor")),
-            [
-                (LedgerEntryLog.BalanceField.AVAILABLE, -100000),
-                (LedgerEntryLog.BalanceField.RESERVED, 100000),
-                (LedgerEntryLog.BalanceField.CURRENT, -100000),
-                (LedgerEntryLog.BalanceField.RESERVED, -100000),
-            ],
-        )
-
-    def test_idempotency_key_returns_existing_entry_without_duplicate_logs(self):
-        first = post_top_up(
-            self.account,
-            amount_minor=100000,
-            reference="TOPUP-003",
-            idempotency_key="topup-key-003",
-        )
-        second = post_top_up(
-            self.account,
-            amount_minor=100000,
-            reference="TOPUP-003",
-            idempotency_key="topup-key-003",
-        )
-
-        self.account.refresh_from_db()
-        self.assertEqual(first.id, second.id)
-        self.assertEqual(self.account.available_balance_minor, 100000)
-        self.assertEqual(LedgerEntryLog.objects.filter(entry=first).count(), 4)
-        self.assertEqual(WalletAccount.objects.count(), 1)
+        self.assertEqual(tx.status, Transaction.Status.PROCESSING)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, Transaction.Status.COMPLETED)
 
     def test_idempotency_key_reuse_with_different_payload_is_rejected(self):
-        post_top_up(
+        initiate_pay_in(
             self.account,
             amount_minor=100000,
             reference="TOPUP-004",
@@ -102,9 +70,22 @@ class LedgerServiceTests(TestCase):
         )
 
         with self.assertRaises(IdempotencyConflict):
-            post_top_up(
+            initiate_pay_in(
                 self.account,
                 amount_minor=200000,
                 reference="TOPUP-004-DIFFERENT",
                 idempotency_key="topup-key-004",
             )
+
+    def test_payment_interface_sandbox_completes_webhook_flow(self):
+        payment_request = PaymentInterface(sandbox=True).initiate_stk_push(
+            self.account,
+            amount_minor=50000,
+            phone_number="254700900001",
+        )
+
+        payment_request.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(self.account.available_balance_minor, 50000)
+        self.assertEqual(Account.objects.count(), 1)

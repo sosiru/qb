@@ -7,6 +7,25 @@ from corsheaders.defaults import default_headers, default_methods
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _load_dotenv(path):
+    if not path.exists():
+        return
+
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key.startswith("export "):
+            key = key[7:].strip()
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv(BASE_DIR / ".env")
+
+
 def _env_bool(name, default=False):
     return os.environ.get(name, "1" if default else "0").lower() in {"1", "true", "yes", "on"}
 
@@ -145,22 +164,12 @@ AUTH_USER_MODEL = "eusers.User"
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:4200")
 BACKGROUND_COMMANDS_ENABLED = os.environ.get("BACKGROUND_COMMANDS_ENABLED", "1") == "1"
 
-PESAWAY_ENABLED = os.environ.get("PESAWAY_ENABLED", "0") == "1"
-PESAWAY_RESULTS_URL = os.environ.get("PESAWAY_RESULTS_URL", "https://upstanding-amie-contritely.ngrok-free.dev/api/v1/providers/pesaway/results/")
-PESAWAY_DEFAULT_CURRENCY = os.environ.get("PESAWAY_DEFAULT_CURRENCY", "KES")
-PESAWAY_TIMEOUT_SECONDS = int(os.environ.get("PESAWAY_TIMEOUT_SECONDS", "30"))
-PESAWAY_C2B_CHANNEL = os.environ.get("PESAWAY_C2B_CHANNEL", "MPESA")
-PESAWAY_B2C_CHANNEL = os.environ.get("PESAWAY_B2C_CHANNEL", "MPESA")
-PESAWAY_B2B_PAYBILL_CHANNEL = os.environ.get("PESAWAY_B2B_PAYBILL_CHANNEL", "PAYBILL")
-PESAWAY_B2B_TILL_CHANNEL = os.environ.get("PESAWAY_B2B_TILL_CHANNEL", "TILL")
-PESAWAY_BANK_CHANNEL = os.environ.get("PESAWAY_BANK_CHANNEL", "BANK")
+PAYMENT_MICROSERVICE_URL = os.environ.get("PAYMENT_MICROSERVICE_URL", "")
+PAYMENT_MICROSERVICE_API_KEY = os.environ.get("PAYMENT_MICROSERVICE_API_KEY", "")
+# PAYMENT_MICROSERVICE_SANDBOX = os.environ.get("PAYMENT_MICROSERVICE_SANDBOX", "0") == "0"
+PAYMENT_MICROSERVICE_SANDBOX = False
+PAYMENT_MICROSERVICE_TIMEOUT_SECONDS = int(os.environ.get("PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", "30"))
 
-PESAWAY_CALLBACK_SIGNATURE_KEY = "9gV+:d39AZ{V9J+![+;AQ!+x39eGKx4s"
-PESAWAY_CLIENT_SECRET = ";E{Z33Zpq0?E28nz"
-PESAWAY_CLIENT_ID = "h@y4{UVUjT9u2cmN74c}ZY:DTct7_D0?"
-PESAWAY_BASE_URL = os.environ.get("PESAWAY_BASE_URL", "https://api.pesaway.com")
-# PESAWAY_B2C_CALLBACK = "https://api.mchangohub.com/api/billing/api/v1/callbacks/b2c/"
-# PESAWAY_C2B_CALLBACK = "https://utilities.rentwaveafrica.co.ke/pay/callbacks/c2b/"
 NOTIFY_URL = os.environ.get("NOTIFY", "")
 NOTIFY_API_KEY = os.environ.get("NOTIFY_API_KEY") or os.environ.get("X-API-KEY", "")
 NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "route")
@@ -171,7 +180,7 @@ EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "1") == "1"
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "mvpmtech@gmail.com")
-EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "lxyprrcarwsmbusg")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", f"Quick Bundl <{EMAIL_HOST_USER}>")
 EMAIL_TIMEOUT = int(os.environ.get("EMAIL_TIMEOUT", "30"))
 
@@ -189,6 +198,9 @@ LOGGING = {
             "class": "logging.StreamHandler",
             "formatter": "structured",
         },
+        "null": {
+            "class": "logging.NullHandler",
+        },
     },
     "root": {
         "handlers": ["console"],
@@ -198,6 +210,10 @@ LOGGING = {
         "django.server": {
             "handlers": ["console"],
             "level": LOG_LEVEL,
+            "propagate": False,
+        },
+        "daphne.server": {
+            "handlers": ["null"],
             "propagate": False,
         },
     },

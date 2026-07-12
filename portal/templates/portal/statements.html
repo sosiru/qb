@@ -4,7 +4,7 @@
 {% block page_heading %}{{ page_title }}{% endblock %}
 {% block page_subheading %}{{ page_description }}{% endblock %}
 {% block page_actions %}
-  <a class="button primary" href="{% url 'portal:statements' %}{% if selected_organization %}?organization_id={{ selected_organization.id }}&print=1{% else %}?print=1{% endif %}">Print view</a>
+  <a class="button primary btn-primary statement-print-action" href="{% url 'portal:statements' %}{% if selected_organization %}?organization_id={{ selected_organization.id }}&print=1{% else %}?print=1{% endif %}">Print view</a>
 {% endblock %}
 {% block content %}
   <section class="statement-sheet">
