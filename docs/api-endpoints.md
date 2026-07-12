@@ -266,7 +266,7 @@ Optional:
 
 - `schedule_ids`: array of schedule UUIDs
 - `payment_mode`: `WALLET` or `STK`
-- `simulate_collection`: set `false` to enqueue a real PesaWay collection request when `payment_mode` is `STK`
+- `simulate_collection`: set `false` to enqueue a real payment microservice collection request when `payment_mode` is `STK`
 
 ### Quick pay payload
 
@@ -360,25 +360,10 @@ Provides statement-style aggregates and rows for the UI:
 - total fees
 - transaction rows with base, fee, and gross amounts
 
-## Provider callbacks
+## Payment microservice
 
-- `POST /providers/pesaway/results/`
-
-Configure `PESAWAY_RESULTS_URL` to this endpoint on a public HTTPS domain in production.
-
-## PesaWay environment variables
-
-- `PESAWAY_ENABLED`
-- `PESAWAY_CLIENT_ID`
-- `PESAWAY_CLIENT_SECRET`
-- `PESAWAY_BASE_URL`
-- `PESAWAY_RESULTS_URL`
-- `PESAWAY_DEFAULT_CURRENCY`
-- `PESAWAY_C2B_CHANNEL`
-- `PESAWAY_B2C_CHANNEL`
-- `PESAWAY_B2B_PAYBILL_CHANNEL`
-- `PESAWAY_B2B_TILL_CHANNEL`
-- `PESAWAY_BANK_CHANNEL`
+Quick Bundl dispatches real payment operations through the configured payment microservice.
+See `docs/payment-microservice.md` for sample requests, responses, callbacks, and status checks.
 
 ## Background commands
 
