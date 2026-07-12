@@ -4,10 +4,10 @@ from ledger.services import PaymentInterface
 
 
 class Command(BaseCommand):
-    help = "Query the payment microservice for payment requests stuck in PROCESSING."
+    help = "Query and fail payment requests stuck in PROCESSING past the timeout."
 
     def add_arguments(self, parser):
-        parser.add_argument("--older-than-seconds", type=int, default=120)
+        parser.add_argument("--older-than-seconds", type=int, default=180)
         parser.add_argument("--limit", type=int, default=50)
 
     def handle(self, *args, **options):
@@ -15,4 +15,4 @@ class Command(BaseCommand):
             older_than_seconds=options["older_than_seconds"],
             limit=options["limit"],
         )
-        self.stdout.write(self.style.SUCCESS(f"Queried {processed} processing payment request(s)."))
+        self.stdout.write(self.style.SUCCESS(f"Reconciled {processed} processing payment request(s)."))

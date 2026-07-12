@@ -68,7 +68,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 }
 ```
 
-Quick Bundl stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value.
+Quick Bundl stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value. If a request stays in `PROCESSING` for more than 3 minutes, Quick Bundl fails it locally with a timeout failure reason.
 
 ## Initiate Payout
 
@@ -159,7 +159,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 
 ## Query Transaction Status
 
-Quick Bundl calls this for payment requests that remain in `PROCESSING`.
+Quick Bundl calls this for payment requests that remain in `PROCESSING`. Requests that are still not final after 3 minutes are failed locally.
 
 ### Request
 
@@ -184,7 +184,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/status/" \
 }
 ```
 
-If the response does not contain `success`, Quick Bundl treats it as informational and keeps the local payment request open.
+If the response does not contain `success`, Quick Bundl treats it as informational and keeps the local payment request open until the 3-minute processing timeout is reached.
 
 ### Completed Response
 
@@ -208,9 +208,41 @@ If the response does not contain `success`, Quick Bundl treats it as information
   "originator_ref": "REQ-20260712-000042",
   "request_id": "MS-PAYOUT-31A8F604",
   "status": "FAILED",
+  "failure_reason": "Recipient account could not be credited",
   "error": "Recipient account could not be credited"
 }
 ```
+
+Failure responses should include at least one human-readable reason field. Quick Bundl checks `failure_reason`, then `message`, then `error`.
+
+## Processing Timeout
+
+Quick Bundl fails any payment request that remains in `PROCESSING` for more than 180 seconds.
+
+Run the reconciliation command periodically, for example every minute:
+
+```bash
+python manage.py reconcile_processing_payments
+```
+
+The local timeout reason is:
+
+```text
+Payment request timed out after 180 seconds without a final microservice response.
+```
+
+If the status check itself fails after the timeout, the local reason is:
+
+```text
+Payment status check failed after 180 seconds: <microservice error>
+```
+
+Timeout failure reasons are written to:
+
+- `ledger.PaymentRequest.last_error`
+- `ledger.Transaction.failure_reason`
+- `base.PaymentInstruction.failure_reason`, for payout instruction requests
+- the batch failure metadata/event trail, for batch collection requests
 
 ## Callback to Quick Bundl
 
@@ -260,6 +292,7 @@ curl -X POST "https://quickbundl.example.com/api/v1/payments/webhook/" \
     "originator_ref": "REQ-20260712-000042",
     "request_id": "MS-PAYOUT-31A8F604",
     "status": "FAILED",
+    "failure_reason": "Insufficient provider float",
     "error": "Insufficient provider float"
   }'
 ```
@@ -321,7 +354,8 @@ Quick Bundl records non-2xx responses as dispatch failures, including the respon
 | `transaction_receipt` | Microservice to Quick Bundl | Recommended on success | Used as the visible microservice reference. |
 | `confirmation_key` | Microservice to Quick Bundl | Optional | Stored on completed ledger transactions. |
 | `message` | Microservice to Quick Bundl | Optional | Human-readable status detail. |
-| `error` | Microservice to Quick Bundl | Recommended on failure | Human-readable failure reason. |
+| `failure_reason` | Microservice to Quick Bundl | Recommended on failure | Preferred human-readable failure reason. |
+| `error` | Microservice to Quick Bundl | Recommended on failure | Fallback human-readable failure reason. |
 
 ## Implementation Notes
 
@@ -330,3 +364,4 @@ Quick Bundl records non-2xx responses as dispatch failures, including the respon
 - A final callback or status response must include `success`.
 - Use `success: true` for completed payments and `success: false` for failed payments.
 - Do not return `success: false` for pending transactions; omit `success` and return `status: "PROCESSING"` instead.
+- Do not leave transactions processing beyond 3 minutes. Send a final callback or return a final status with a clear `failure_reason`, `message`, or `error`.

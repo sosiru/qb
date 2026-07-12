@@ -453,6 +453,8 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
 
 
 class PaymentInterface:
+    PROCESSING_TIMEOUT_SECONDS = 180
+
     def __init__(self, *, sandbox=None, base_url=None, api_key=None, timeout=None):
         self.sandbox = getattr(settings, "PAYMENT_MICROSERVICE_SANDBOX", True) if sandbox is None else sandbox
         self.base_url = (base_url or getattr(settings, "PAYMENT_MICROSERVICE_URL", "")).rstrip("/")
@@ -617,6 +619,7 @@ class PaymentInterface:
             payment_request.status = PaymentRequest.Status.COMPLETED
             payment_request.last_error = ""
         else:
+            reason = str(payload.get("failure_reason") or payload.get("message") or payload.get("error") or "Payment failed")
             if instruction_id:
                 from base.models import PaymentInstruction
                 from base.services import record_instruction_failure
@@ -624,23 +627,54 @@ class PaymentInterface:
                 instruction = PaymentInstruction.objects.get(id=instruction_id)
                 record_instruction_failure(
                     instruction,
-                    str(payload.get("message") or payload.get("error") or "Payment failed"),
+                    reason,
                     microservice_response={"callback": payload, "payment_request_id": str(payment_request.id)},
                 )
+            elif batch_collection_id:
+                from base.models import PaymentBatch
+                from base.services import record_batch_failure
+
+                fail_transaction(tx, reason=reason, response_payload=payload)
+                batch = PaymentBatch.objects.get(id=batch_collection_id)
+                record_batch_failure(batch, reason)
             else:
-                fail_transaction(tx, reason=str(payload.get("message") or payload.get("error") or "Payment failed"), response_payload=payload)
+                fail_transaction(tx, reason=reason, response_payload=payload)
             payment_request.status = PaymentRequest.Status.FAILED
-            payment_request.last_error = str(payload.get("message") or payload.get("error") or "Payment failed")[:255]
+            payment_request.last_error = reason[:255]
         payment_request.response_payload = payload
         payment_request.save(update_fields=["status", "last_error", "response_payload", "updated_at"])
         return payment_request
 
-    def retry_stale_processing(self, *, older_than_seconds=120, limit=50):
+    def fail_processing_request(self, payment_request, reason):
+        payload = {
+            **(payment_request.response_payload or {}),
+            "success": False,
+            "originator_ref": payment_request.originator_ref,
+            "request_id": payment_request.request_id,
+            "status": PaymentRequest.Status.FAILED,
+            "failure_reason": reason,
+            "error": reason,
+        }
+        return self.handle_webhook(payload)
+
+    def retry_stale_processing(self, *, older_than_seconds=PROCESSING_TIMEOUT_SECONDS, limit=50):
         cutoff = timezone.now() - timezone.timedelta(seconds=older_than_seconds)
         requests = PaymentRequest.objects.filter(status=PaymentRequest.Status.PROCESSING, created_at__lt=cutoff).order_by("created_at")[:limit]
         processed = 0
         for payment_request in requests:
-            self.query_status(payment_request)
+            timeout_reason = f"Payment request timed out after {older_than_seconds} seconds without a final microservice response."
+            try:
+                self.query_status(payment_request)
+            except LedgerError as exc:
+                self.fail_processing_request(
+                    payment_request,
+                    f"Payment status check failed after {older_than_seconds} seconds: {exc}",
+                )
+                processed += 1
+                continue
+            payment_request.refresh_from_db()
+            if payment_request.status == PaymentRequest.Status.PROCESSING:
+                self.fail_processing_request(payment_request, timeout_reason)
             processed += 1
         return processed
 
