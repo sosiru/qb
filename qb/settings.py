@@ -38,7 +38,13 @@ def _env_list(name, default_values):
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS", ["*"])
+CSRF_ALLOWED_HOSTS = _env_list(
+    "CSRF_ALLOWED_HOSTS",
+    [
+        "*",
+    ],
+)
+ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS", CSRF_ALLOWED_HOSTS)
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -104,6 +110,14 @@ CSRF_TRUSTED_ORIGINS = _env_list(
         "http://localhost:4200",
         "http://127.0.0.1:4200",
         "https://*.ngrok-free.dev",
+        "https://utilities.rentwaveafrica.co.ke",
+        "https://stage-utilities.rentwaveafrica.co.ke",
+        "https://api.rentwaveafrica.co.ke",
+        "https://stage-api.rentwaveafrica.co.ke",
+        "https://rentwaveafrica.co.ke",
+        "https://www.rentwaveafrica.co.ke",
+        "https://stage.rentwaveafrica.co.ke",
+        "https://qb.lipasync.com",
     ],
 )
 ROOT_URLCONF = "qb.urls"
