@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /usr/src/app
 
@@ -16,11 +16,11 @@ COPY . .
 RUN python manage.py collectstatic --noinput --clear
 
 
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 WORKDIR /usr/src/app
 
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY --from=builder /usr/src/app /usr/src/app
