@@ -9,9 +9,18 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--older-than-seconds", type=int, default=180)
         parser.add_argument("--limit", type=int, default=50)
+        sandbox_group = parser.add_mutually_exclusive_group()
+        sandbox_group.add_argument("--sandbox", action="store_true", help="Use sandbox mode for this run.")
+        sandbox_group.add_argument("--live", action="store_true", help="Use live payment microservice mode for this run.")
 
     def handle(self, *args, **options):
-        processed = PaymentInterface(sandbox=False).retry_stale_processing(
+        sandbox = None
+        if options["sandbox"]:
+            sandbox = True
+        elif options["live"]:
+            sandbox = False
+
+        processed = PaymentInterface(sandbox=sandbox).retry_stale_processing(
             older_than_seconds=options["older_than_seconds"],
             limit=options["limit"],
         )

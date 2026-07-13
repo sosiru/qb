@@ -663,6 +663,10 @@ class PaymentInterface:
         processed = 0
         for payment_request in requests:
             timeout_reason = f"Payment request timed out after {older_than_seconds} seconds without a final microservice response."
+            if self.sandbox:
+                self.fail_processing_request(payment_request, timeout_reason)
+                processed += 1
+                continue
             try:
                 self.query_status(payment_request)
             except LedgerError as exc:
