@@ -657,12 +657,16 @@ class PaymentInterface:
         }
         return self.handle_webhook(payload)
 
-    def retry_stale_processing(self, *, older_than_seconds=PROCESSING_TIMEOUT_SECONDS, limit=50):
+    def retry_stale_processing(self, *, older_than_seconds=PROCESSING_TIMEOUT_SECONDS, limit=50, query_status=False):
         cutoff = timezone.now() - timezone.timedelta(seconds=older_than_seconds)
         requests = PaymentRequest.objects.filter(status=PaymentRequest.Status.PROCESSING, created_at__lt=cutoff).order_by("created_at")[:limit]
         processed = 0
         for payment_request in requests:
             timeout_reason = f"Payment request timed out after {older_than_seconds} seconds without a final microservice response."
+            if self.sandbox or not query_status:
+                self.fail_processing_request(payment_request, timeout_reason)
+                processed += 1
+                continue
             try:
                 self.query_status(payment_request)
             except LedgerError as exc:
@@ -685,6 +689,7 @@ class PaymentInterface:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-API-Key"] = self.api_key
         req = request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
         try:
             with request.urlopen(req, timeout=self.timeout) as response:

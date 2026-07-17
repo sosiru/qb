@@ -115,10 +115,11 @@ class LedgerServiceTests(TestCase):
             created_at=timezone.now() - timezone.timedelta(minutes=4)
         )
 
-        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}):
+        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
             processed = PaymentInterface(sandbox=False, base_url="http://payments.example").retry_stale_processing()
 
         self.assertEqual(processed, 1)
+        post.assert_not_called()
         payment_request.refresh_from_db()
         tx.refresh_from_db()
         self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
@@ -168,9 +169,10 @@ class LedgerServiceTests(TestCase):
             created_at=timezone.now() - timezone.timedelta(minutes=4)
         )
 
-        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}):
-            PaymentInterface(sandbox=False, base_url="http://payments.example").retry_stale_processing()
+        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
+            PaymentInterface(sandbox=False, base_url="http://payments.example").retry_stale_processing(query_status=True)
 
+        post.assert_called_once()
         payment_request.refresh_from_db()
         instruction.refresh_from_db()
         batch.refresh_from_db()

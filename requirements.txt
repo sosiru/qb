@@ -28,3 +28,4 @@ typing_extensions==4.16.0
 ujson==5.13.0
 wheel==0.47.0
 zope.interface==8.5
+whitenoise==6.11.0

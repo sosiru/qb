@@ -15,6 +15,7 @@ COMMANDS = (
     "run_due_payments",
     "process_outbox",
     "process_notifications",
+    "reconcile_processing_payments",
 )
 INTERVAL_SECONDS = 60
 

@@ -38,7 +38,13 @@ def _env_list(name, default_values):
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS", ["*"])
+CSRF_ALLOWED_HOSTS = _env_list(
+    "CSRF_ALLOWED_HOSTS",
+    [
+        "*",
+    ],
+)
+ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS", CSRF_ALLOWED_HOSTS)
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -60,6 +66,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "qb.middleware.RequestLogMiddleware",
@@ -103,6 +110,14 @@ CSRF_TRUSTED_ORIGINS = _env_list(
         "http://localhost:4200",
         "http://127.0.0.1:4200",
         "https://*.ngrok-free.dev",
+        "https://utilities.rentwaveafrica.co.ke",
+        "https://stage-utilities.rentwaveafrica.co.ke",
+        "https://api.rentwaveafrica.co.ke",
+        "https://stage-api.rentwaveafrica.co.ke",
+        "https://rentwaveafrica.co.ke",
+        "https://www.rentwaveafrica.co.ke",
+        "https://stage.rentwaveafrica.co.ke",
+        "https://qb.lipasync.com",
     ],
 )
 ROOT_URLCONF = "qb.urls"
@@ -153,8 +168,12 @@ TIME_ZONE = os.environ.get("APP_TIME_ZONE", "Africa/Nairobi")
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+# STATIC_URL = "static/"
+# STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "eusers.User"
 
@@ -167,8 +186,7 @@ BACKGROUND_COMMANDS_ENABLED = os.environ.get("BACKGROUND_COMMANDS_ENABLED", "1")
 
 PAYMENT_MICROSERVICE_URL = os.environ.get("PAYMENT_MICROSERVICE_URL", "")
 PAYMENT_MICROSERVICE_API_KEY = os.environ.get("PAYMENT_MICROSERVICE_API_KEY", "")
-# PAYMENT_MICROSERVICE_SANDBOX = os.environ.get("PAYMENT_MICROSERVICE_SANDBOX", "0") == "0"
-PAYMENT_MICROSERVICE_SANDBOX = False
+PAYMENT_MICROSERVICE_SANDBOX = _env_bool("PAYMENT_MICROSERVICE_SANDBOX", False)
 PAYMENT_MICROSERVICE_TIMEOUT_SECONDS = int(os.environ.get("PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", "30"))
 
 NOTIFY_URL = os.environ.get("NOTIFY", "")
