@@ -577,6 +577,22 @@ class QuickBundlPlatformTests(TestCase):
         self.assertIn("idempotency-key", allowed_headers)
         self.assertIn("ngrok-skip-browser-warning", allowed_headers)
 
+    def test_default_cors_settings_support_production_frontend_origin(self):
+        response = self.client.options(
+            "/api/v1/auth/login/",
+            HTTP_ORIGIN="https://qb-ui.lipasync.com",
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD="POST",
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS="Content-Type, Idempotency-Key, X-Idempotency-Key",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Access-Control-Allow-Origin"], "https://qb-ui.lipasync.com")
+        self.assertEqual(response["Access-Control-Allow-Credentials"], "true")
+        allowed_headers = response["Access-Control-Allow-Headers"].lower()
+        self.assertIn("content-type", allowed_headers)
+        self.assertIn("idempotency-key", allowed_headers)
+        self.assertIn("x-idempotency-key", allowed_headers)
+
     def test_default_cors_settings_support_ngrok_frontend_origin(self):
         response = self.client.get(
             "/api/v1/reports/exports/",

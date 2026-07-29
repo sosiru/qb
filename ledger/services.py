@@ -1,6 +1,7 @@
 import json
 import secrets
 import time
+from decimal import Decimal
 from urllib import error, request
 
 from django.conf import settings
@@ -454,6 +455,16 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
 
 class PaymentInterface:
     PROCESSING_TIMEOUT_SECONDS = 180
+    LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "SETTLED"}
+    LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED"}
+    LIPASYNC_PENDING_STATUSES = {
+        "INITIATED",
+        "REQUIRES_ACTION",
+        "PROCESSING",
+        "AUTHORIZED",
+        "PARTIALLY_CAPTURED",
+        "PARTIALLY_REFUNDED",
+    }
 
     def __init__(self, *, sandbox=None, base_url=None, api_key=None, timeout=None):
         self.sandbox = getattr(settings, "PAYMENT_MICROSERVICE_SANDBOX", True) if sandbox is None else sandbox
@@ -470,9 +481,16 @@ class PaymentInterface:
             description="STK push wallet top-up",
             metadata={**(metadata or {}), "phone_number": phone_number},
         )
-        return self._create_or_submit_request(tx, PaymentRequest.Operation.STK_PUSH, {"phone_number": phone_number})
+        return self._create_or_submit_request(
+            tx,
+            PaymentRequest.Operation.STK_PUSH,
+            {"phone_number": phone_number},
+            metadata=metadata,
+        )
 
     def initiate_pay_in(self, account, *, amount_minor, idempotency_key="", metadata=None):
+        if not self.sandbox:
+            raise LedgerError("Lipasync live payments require STK push for pay-ins.")
         tx = initiate_pay_in(
             account,
             amount_minor=amount_minor,
@@ -481,9 +499,11 @@ class PaymentInterface:
             description="Pay in",
             metadata=metadata,
         )
-        return self._create_or_submit_request(tx, PaymentRequest.Operation.PAY_IN, {})
+        return self._create_or_submit_request(tx, PaymentRequest.Operation.PAY_IN, {}, metadata=metadata)
 
     def initiate_payout(self, account, *, amount_minor, destination=None, idempotency_key="", metadata=None):
+        if not self.sandbox:
+            self._validate_lipasync_payout_destination(destination or {})
         tx = initiate_payout(
             account,
             amount_minor=amount_minor,
@@ -492,9 +512,17 @@ class PaymentInterface:
             description="Payout",
             metadata={**(metadata or {}), "destination": destination or {}},
         )
-        return self._create_or_submit_request(tx, PaymentRequest.Operation.PAYOUT, {"destination": destination or {}})
+        return self._create_or_submit_request(
+            tx,
+            PaymentRequest.Operation.PAYOUT,
+            {"destination": destination or {}},
+            metadata=metadata,
+        )
 
     def initiate_instruction_payout(self, instruction, *, transaction_record=None, idempotency_key="", metadata=None):
+        destination = instruction.destination or {}
+        if not self.sandbox:
+            self._validate_lipasync_payout_destination(destination)
         if transaction_record is None:
             account = instruction.batch.organization.billing_accounts.first() if instruction.batch.organization_id else instruction.batch.user.billing_accounts.first()
             tx = initiate_payout(
@@ -507,7 +535,6 @@ class PaymentInterface:
             )
         else:
             tx = transaction_record
-        destination = instruction.destination or {}
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.PAYOUT,
@@ -520,15 +547,38 @@ class PaymentInterface:
                 "destination": destination,
             },
             originator_ref=unique_transaction_reference("REQ"),
+            metadata={**(metadata or {}), "instruction_id": str(instruction.id), "batch_id": str(instruction.batch_id)},
         )
 
-    def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None):
+    def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None, metadata=None):
         originator_ref = originator_ref or tx.internal_reference
-        payload = {
+        metadata = metadata or tx.metadata or {}
+        if self.sandbox:
+            provider_path = ""
+            provider_payload = {
+                "amount": self._amount_major(tx.amount_minor),
+                "currency": tx.currency,
+                "external_reference": originator_ref,
+                "idempotency_key": originator_ref,
+                "payment_payload": extra_payload,
+            }
+        else:
+            provider_path, provider_payload = self._lipasync_initiate_request(
+                tx,
+                operation,
+                extra_payload,
+                originator_ref=originator_ref,
+            )
+        stored_payload = {
             "originator_ref": originator_ref,
+            "external_reference": originator_ref,
+            "idempotency_key": originator_ref,
             "amount_minor": tx.amount_minor,
+            "amount": provider_payload["amount"],
             "currency": tx.currency,
             "operation": operation,
+            "payment_payload": provider_payload["payment_payload"],
+            "metadata": metadata,
             **extra_payload,
         }
         payment_request = PaymentRequest.objects.create(
@@ -536,7 +586,7 @@ class PaymentInterface:
             operation=operation,
             originator_ref=originator_ref,
             sandbox=self.sandbox,
-            request_payload=payload,
+            request_payload=stored_payload,
         )
         if self.sandbox:
             response_payload = {
@@ -552,10 +602,14 @@ class PaymentInterface:
             self.handle_webhook(response_payload)
             payment_request.refresh_from_db()
             return payment_request
-        response_payload = self._post("/transactions/initiate/", payload)
+        response_payload = self._post(provider_path, provider_payload)
+        normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
         payment_request.response_payload = response_payload
-        payment_request.request_id = str(response_payload.get("request_id") or response_payload.get("id") or "")
+        payment_request.request_id = normalized_payload.get("request_id") or ""
         payment_request.save(update_fields=["response_payload", "request_id", "updated_at"])
+        if "success" in normalized_payload:
+            self.handle_webhook({**response_payload, **normalized_payload})
+            payment_request.refresh_from_db()
         return payment_request
 
     def query_status(self, payment_request):
@@ -564,21 +618,37 @@ class PaymentInterface:
         payment_request.last_query_at = timezone.now()
         payment_request.response_payload = response_payload
         payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
-        if "success" in response_payload:
-            self.handle_webhook(response_payload)
+        normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
+        if "success" in normalized_payload:
+            self.handle_webhook({**response_payload, **normalized_payload})
         return response_payload
 
     def handle_webhook(self, payload):
-        originator_ref = str(payload.get("originator_ref") or "")
-        request_id = str(payload.get("request_id") or "")
+        normalized_payload = self._normalize_microservice_payload(payload)
+        originator_ref = normalized_payload.get("originator_ref") or ""
+        request_id = normalized_payload.get("request_id") or ""
         if not originator_ref and not request_id:
             raise LedgerError("originator_ref or request_id is required.")
         lookup = {"originator_ref": originator_ref} if originator_ref else {"request_id": request_id}
         payment_request = PaymentRequest.objects.select_related("transaction").get(**lookup)
         tx = payment_request.transaction
+        payload = {**payload, **self._normalize_microservice_payload(payload, payment_request=payment_request)}
+        if payment_request.request_id != request_id and request_id:
+            payment_request.request_id = request_id
+        request_payload = payment_request.request_payload or {}
+        request_metadata = request_payload.get("metadata") or {}
+        instruction_id = request_payload.get("instruction_id") or request_metadata.get("instruction_id")
+        batch_collection_id = (
+            request_payload.get("batch_id") or request_metadata.get("batch_id")
+            if request_payload.get("purpose") == "batch_collection" or request_metadata.get("purpose") == "batch_collection"
+            else ""
+        )
+        if "success" not in payload:
+            payment_request.response_payload = payload
+            payment_request.last_error = ""
+            payment_request.save(update_fields=["request_id", "last_error", "response_payload", "updated_at"])
+            return payment_request
         success = bool(payload.get("success"))
-        instruction_id = (payment_request.request_payload or {}).get("instruction_id")
-        batch_collection_id = (payment_request.request_payload or {}).get("batch_id") if (payment_request.request_payload or {}).get("purpose") == "batch_collection" else ""
         if success:
             if instruction_id:
                 from base.models import PaymentInstruction
@@ -642,7 +712,7 @@ class PaymentInterface:
             payment_request.status = PaymentRequest.Status.FAILED
             payment_request.last_error = reason[:255]
         payment_request.response_payload = payload
-        payment_request.save(update_fields=["status", "last_error", "response_payload", "updated_at"])
+        payment_request.save(update_fields=["request_id", "status", "last_error", "response_payload", "updated_at"])
         return payment_request
 
     def fail_processing_request(self, payment_request, reason):
@@ -663,7 +733,7 @@ class PaymentInterface:
         processed = 0
         for payment_request in requests:
             timeout_reason = f"Payment request timed out after {older_than_seconds} seconds without a final microservice response."
-            if self.sandbox or not query_status:
+            if self.sandbox or not query_status or not self._supports_status_query():
                 self.fail_processing_request(payment_request, timeout_reason)
                 processed += 1
                 continue
@@ -689,7 +759,7 @@ class PaymentInterface:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-            headers["X-API-Key"] = self.api_key
+            headers["X-Api-Key"] = self.api_key
         req = request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
         try:
             with request.urlopen(req, timeout=self.timeout) as response:
@@ -704,3 +774,98 @@ class PaymentInterface:
             raise LedgerError(f"Payment microservice returned HTTP {exc.code}: {parsed}") from exc
         except error.URLError as exc:
             raise LedgerError(str(exc.reason)) from exc
+
+    def _supports_status_query(self):
+        return "lipasync.com" not in self.base_url and "/core/payments/qb" not in self.base_url
+
+    def _lipasync_initiate_request(self, tx, operation, extra_payload, *, originator_ref):
+        if operation == PaymentRequest.Operation.STK_PUSH:
+            return (
+                "/stk-push/initiate/",
+                {
+                    "amount": self._amount_major(tx.amount_minor),
+                    "currency": tx.currency,
+                    "external_reference": originator_ref,
+                    "idempotency_key": originator_ref,
+                    "payment_payload": {
+                        "daraja_flow": "stk_push",
+                        "phone_number": extra_payload.get("phone_number") or "",
+                        "account_reference": extra_payload.get("account_reference") or "",
+                    },
+                },
+            )
+        if operation == PaymentRequest.Operation.PAYOUT:
+            destination = extra_payload.get("destination") or {}
+            return (
+                "/b2b_paybill/initiate/",
+                {
+                    "amount": self._amount_major(tx.amount_minor),
+                    "currency": tx.currency,
+                    "external_reference": originator_ref,
+                    "idempotency_key": originator_ref,
+                    "payment_payload": {
+                        "daraja_flow": "b2b_paybill",
+                        "destination_shortcode": self._paybill_shortcode(destination),
+                        "account_reference": destination.get("account_reference") or destination.get("account_number") or "",
+                    },
+                },
+            )
+        raise LedgerError(f"Lipasync does not support payment operation {operation}.")
+
+    def _normalize_microservice_payload(self, payload, *, payment_request=None):
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        status = str(payload.get("status") or data.get("status") or "").upper()
+        event = str(payload.get("event") or "").lower()
+        normalized = {
+            "originator_ref": str(
+                payload.get("originator_ref")
+                or payload.get("external_reference")
+                or data.get("external_reference")
+                or data.get("idempotency_key")
+                or (payment_request.originator_ref if payment_request else "")
+                or ""
+            ),
+            "request_id": str(
+                payload.get("request_id")
+                or payload.get("payment_intent_id")
+                or data.get("payment_intent_id")
+                or data.get("request_id")
+                or data.get("id")
+                or (payment_request.request_id if payment_request else "")
+                or ""
+            ),
+            "transaction_receipt": str(
+                payload.get("transaction_receipt")
+                or payload.get("transaction_id")
+                or data.get("transaction_id")
+                or data.get("payment_intent_id")
+                or ""
+            ),
+            "confirmation_key": str(payload.get("confirmation_key") or ""),
+            "status": status,
+        }
+        if "success" in payload:
+            normalized["success"] = bool(payload.get("success"))
+            return normalized
+        if status in self.LIPASYNC_SUCCESS_STATUSES or event in {"payment.captured", "payment.settled"}:
+            normalized["success"] = True
+        elif status in self.LIPASYNC_FAILURE_STATUSES or event in {
+            "payment.failed",
+            "payment.cancelled",
+            "payment.refunded",
+        }:
+            normalized["success"] = False
+            reason = payload.get("failure_reason") or payload.get("message") or payload.get("error")
+            normalized["failure_reason"] = str(reason or f"Payment {status.lower() or event.split('.')[-1]}")[:255]
+            normalized["error"] = normalized["failure_reason"]
+        return normalized
+
+    def _amount_major(self, amount_minor):
+        return float((Decimal(int(amount_minor)) / Decimal("100")).quantize(Decimal("0.01")))
+
+    def _validate_lipasync_payout_destination(self, destination):
+        if not self._paybill_shortcode(destination):
+            raise LedgerError("Lipasync B2B payout requires destination.paybill_number or destination.destination_shortcode.")
+
+    def _paybill_shortcode(self, destination):
+        return str(destination.get("destination_shortcode") or destination.get("paybill_number") or "").strip()

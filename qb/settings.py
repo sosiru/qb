@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from corsheaders.defaults import default_headers, default_methods
 
@@ -36,8 +37,17 @@ def _env_list(name, default_values):
         return list(default_values)
     return [value.strip() for value in raw_value.split(",") if value.strip()]
 
+
+def _origin_from_url(url):
+    parsed = urlsplit(url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:4200")
 CSRF_ALLOWED_HOSTS = _env_list(
     "CSRF_ALLOWED_HOSTS",
     [
@@ -77,18 +87,26 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+DEFAULT_CORS_ALLOWED_ORIGINS = [
+    "http://localhost:4200",
+    "http://127.0.0.1:4200",
+    "https://qb-ui.lipasync.com",
+    "https://qb.lipasync.com",
+]
+frontend_origin = _origin_from_url(FRONTEND_BASE_URL)
+if frontend_origin and frontend_origin not in DEFAULT_CORS_ALLOWED_ORIGINS:
+    DEFAULT_CORS_ALLOWED_ORIGINS.append(frontend_origin)
+
 CORS_ALLOW_ALL_ORIGINS = _env_bool("CORS_ALLOW_ALL_ORIGINS", False)
 CORS_ALLOWED_ORIGINS = _env_list(
     "CORS_ALLOWED_ORIGINS",
-    [
-        "http://localhost:4200",
-        "http://127.0.0.1:4200",
-    ],
+    DEFAULT_CORS_ALLOWED_ORIGINS,
 )
 CORS_ALLOWED_ORIGIN_REGEXES = _env_list(
     "CORS_ALLOWED_ORIGIN_REGEXES",
     [
         r"^https://[-a-zA-Z0-9]+\.ngrok-free\.dev$",
+        r"^https://[-a-zA-Z0-9]+\.lipasync\.com$",
     ],
 )
 CORS_ALLOW_CREDENTIALS = _env_bool("CORS_ALLOW_CREDENTIALS", True)
@@ -118,6 +136,8 @@ CSRF_TRUSTED_ORIGINS = _env_list(
         "https://www.rentwaveafrica.co.ke",
         "https://stage.rentwaveafrica.co.ke",
         "https://qb.lipasync.com",
+        "https://qb-ui.lipasync.com",
+        "https://*.lipasync.com",
     ],
 )
 ROOT_URLCONF = "qb.urls"
@@ -181,7 +201,6 @@ AUTH_USER_MODEL = "eusers.User"
 # SESSION_COOKIE_SECURE = not DEBUG
 # CSRF_COOKIE_SECURE = not DEBUG
 
-FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:4200")
 BACKGROUND_COMMANDS_ENABLED = os.environ.get("BACKGROUND_COMMANDS_ENABLED", "1") == "1"
 
 PAYMENT_MICROSERVICE_URL = os.environ.get("PAYMENT_MICROSERVICE_URL", "")
