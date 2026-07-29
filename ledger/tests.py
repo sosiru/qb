@@ -1,6 +1,8 @@
+from io import StringIO
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.core.management import call_command
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from base.models import PaymentBatch, PaymentInstruction
@@ -94,6 +96,132 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(self.account.available_balance_minor, 50000)
         self.assertEqual(Account.objects.count(), 1)
 
+    def test_payment_interface_live_stk_uses_lipasync_payload(self):
+        response_payload = {
+            "message": "Payment initiated successfully",
+            "data": {
+                "payment_intent_id": "PI-STK-001",
+                "status": "INITIATED",
+                "amount": "500.00",
+                "currency": "KES",
+            },
+        }
+
+        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
+            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_stk_push(
+                self.account,
+                amount_minor=50000,
+                phone_number="254700900001",
+                metadata={"purpose": "batch_collection", "batch_id": "batch-001"},
+            )
+
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/stk-push/initiate/")
+        self.assertEqual(payload["amount"], 500.0)
+        self.assertEqual(payload["currency"], "KES")
+        self.assertEqual(payload["external_reference"], payment_request.originator_ref)
+        self.assertEqual(payload["idempotency_key"], payment_request.originator_ref)
+        self.assertEqual(
+            payload["payment_payload"],
+            {
+                "daraja_flow": "stk_push",
+                "phone_number": "254700900001",
+                "account_reference": "",
+            },
+        )
+        self.assertEqual(payment_request.request_id, "PI-STK-001")
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(payment_request.request_payload["metadata"]["purpose"], "batch_collection")
+
+    def test_payment_interface_live_paybill_payout_uses_lipasync_b2b_payload(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-B2B-001"))
+        response_payload = {
+            "message": "Payment initiated successfully",
+            "data": {"payment_intent_id": "PI-B2B-001", "status": "INITIATED", "amount": "750.00", "currency": "KES"},
+        }
+
+        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
+            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_payout(
+                self.account,
+                amount_minor=75000,
+                destination={"paybill_number": "600000", "account_reference": "INV-001"},
+            )
+
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/b2b_paybill/initiate/")
+        self.assertEqual(payload["amount"], 750.0)
+        self.assertEqual(payload["external_reference"], payment_request.originator_ref)
+        self.assertEqual(
+            payload["payment_payload"],
+            {
+                "daraja_flow": "b2b_paybill",
+                "destination_shortcode": "600000",
+                "account_reference": "INV-001",
+            },
+        )
+        self.assertEqual(payment_request.request_id, "PI-B2B-001")
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+
+    def test_lipasync_processing_callback_keeps_payment_processing(self):
+        with patch.object(
+            PaymentInterface,
+            "_post",
+            return_value={"data": {"payment_intent_id": "PI-PENDING-001", "status": "INITIATED"}},
+        ):
+            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_stk_push(
+                self.account,
+                amount_minor=50000,
+                phone_number="254700900001",
+            )
+
+        PaymentInterface().handle_webhook(
+            {
+                "event": "payment.processing",
+                "payment_intent_id": "PI-PENDING-001",
+                "transaction_id": "TX-PENDING-001",
+                "status": "PROCESSING",
+                "amount": "500.00",
+                "currency": "KES",
+            }
+        )
+
+        payment_request.refresh_from_db()
+        payment_request.transaction.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(payment_request.transaction.status, Transaction.Status.PROCESSING)
+
+    def test_lipasync_captured_callback_completes_payment(self):
+        with patch.object(
+            PaymentInterface,
+            "_post",
+            return_value={"data": {"payment_intent_id": "PI-CAPTURED-001", "status": "INITIATED"}},
+        ):
+            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_stk_push(
+                self.account,
+                amount_minor=50000,
+                phone_number="254700900001",
+            )
+
+        PaymentInterface().handle_webhook(
+            {
+                "event": "payment.captured",
+                "payment_intent_id": "PI-CAPTURED-001",
+                "transaction_id": "TX-CAPTURED-001",
+                "status": "CAPTURED",
+                "amount": "500.00",
+                "currency": "KES",
+            }
+        )
+
+        payment_request.refresh_from_db()
+        self.account.refresh_from_db()
+        tx = payment_request.transaction
+        tx.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(tx.status, Transaction.Status.COMPLETED)
+        self.assertEqual(tx.transaction_receipt, "TX-CAPTURED-001")
+        self.assertEqual(self.account.available_balance_minor, 50000)
+
     def test_retry_stale_processing_fails_request_after_timeout(self):
         tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-TIMEOUT-001")
         payment_request = PaymentRequest.objects.create(
@@ -126,6 +254,80 @@ class LedgerServiceTests(TestCase):
         self.assertIn("timed out after 180 seconds", payment_request.last_error)
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertIn("timed out after 180 seconds", tx.failure_reason)
+
+    def test_retry_stale_processing_does_not_query_lipasync_without_status_endpoint(self):
+        tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-LIPASYNC-TIMEOUT-001")
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.STK_PUSH,
+            originator_ref="STK-LIPASYNC-TIMEOUT-001",
+            request_id="PI-LIPASYNC-TIMEOUT-001",
+            request_payload={
+                "originator_ref": "STK-LIPASYNC-TIMEOUT-001",
+                "external_reference": "STK-LIPASYNC-TIMEOUT-001",
+                "amount_minor": 50000,
+                "currency": "KES",
+                "operation": PaymentRequest.Operation.STK_PUSH,
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+        PaymentRequest.objects.filter(id=payment_request.id).update(
+            created_at=timezone.now() - timezone.timedelta(minutes=4)
+        )
+
+        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
+            processed = PaymentInterface(
+                sandbox=False,
+                base_url="https://payments.lipasync.com/api/v1/core/payments/qb",
+            ).retry_stale_processing(query_status=True)
+
+        self.assertEqual(processed, 1)
+        post.assert_not_called()
+        payment_request.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
+        self.assertIn("timed out after 180 seconds", payment_request.last_error)
+
+    @override_settings(
+        PAYMENT_MICROSERVICE_URL="https://payments.lipasync.com/api/v1/core/payments/qb",
+        PAYMENT_MICROSERVICE_SANDBOX=False,
+    )
+    def test_reconcile_processing_payments_command_handles_lipasync_timeout(self):
+        tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-CMD-TIMEOUT-001")
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.STK_PUSH,
+            originator_ref="STK-CMD-TIMEOUT-001",
+            request_id="PI-CMD-TIMEOUT-001",
+            request_payload={
+                "originator_ref": "STK-CMD-TIMEOUT-001",
+                "external_reference": "STK-CMD-TIMEOUT-001",
+                "amount_minor": 50000,
+                "currency": "KES",
+                "operation": PaymentRequest.Operation.STK_PUSH,
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+        PaymentRequest.objects.filter(id=payment_request.id).update(
+            created_at=timezone.now() - timezone.timedelta(minutes=4)
+        )
+        stdout = StringIO()
+
+        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
+            call_command(
+                "reconcile_processing_payments",
+                "--query-status",
+                "--live",
+                stdout=stdout,
+            )
+
+        post.assert_not_called()
+        payment_request.refresh_from_db()
+        tx.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
+        self.assertIn("Reconciled 1 processing payment request", stdout.getvalue())
 
     def test_retry_stale_processing_fails_instruction_with_reason(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=150000, reference="FUND-TIMEOUT-001"))
