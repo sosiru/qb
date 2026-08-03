@@ -638,6 +638,7 @@ class PaymentInterface:
             self.handle_webhook({**response_payload, **normalized_payload})
         return response_payload
 
+    @transaction.atomic
     def handle_webhook(self, payload):
         normalized_payload = self._normalize_microservice_payload(payload)
         originator_ref = normalized_payload.get("originator_ref") or ""
@@ -645,11 +646,16 @@ class PaymentInterface:
         if not originator_ref and not request_id:
             raise LedgerError("originator_ref or request_id is required.")
         lookup = {"originator_ref": originator_ref} if originator_ref else {"request_id": request_id}
-        payment_request = PaymentRequest.objects.select_related("transaction").get(**lookup)
+        payment_request = PaymentRequest.objects.select_for_update().select_related("transaction").get(**lookup)
         tx = payment_request.transaction
         payload = {**payload, **self._normalize_microservice_payload(payload, payment_request=payment_request)}
         if payment_request.request_id != request_id and request_id:
             payment_request.request_id = request_id
+        if payment_request.status in {
+            PaymentRequest.Status.COMPLETED,
+            PaymentRequest.Status.FAILED,
+        }:
+            return payment_request
         request_payload = payment_request.request_payload or {}
         request_metadata = request_payload.get("metadata") or {}
         instruction_id = request_payload.get("instruction_id") or request_metadata.get("instruction_id")
@@ -752,7 +758,8 @@ class PaymentInterface:
         processed = 0
         for payment_request in requests:
             timeout_reason = f"Payment request timed out after {older_than_seconds} seconds without a final microservice response."
-            if self.sandbox or not query_status or not self._supports_status_query():
+            pesaway_inbound = self._is_pesaway_core() and payment_request.operation != PaymentRequest.Operation.PAYOUT
+            if self.sandbox or not query_status or not self._supports_status_query() or pesaway_inbound:
                 self.fail_processing_request(payment_request, timeout_reason)
                 processed += 1
                 continue
@@ -876,7 +883,7 @@ class PaymentInterface:
                     "external_reference": originator_ref,
                     "provider_payload": {
                         "phone_number": phone_number,
-                        "channel": extra_payload.get("channel") or "MPESA",
+                        "channel": self._pesaway_mobile_channel(extra_payload.get("channel")),
                         "reason": extra_payload.get("reason") or "Wallet top-up",
                     },
                 },
@@ -901,9 +908,12 @@ class PaymentInterface:
             event_slug = getattr(settings, "PESAWAY_B2C_EVENT_SLUG", "")
             if not event_slug:
                 raise LedgerError("PESAWAY_B2C_EVENT_SLUG is not configured.")
+            phone_number = str(destination.get("phone_number") or "").strip()
+            if not phone_number:
+                raise LedgerError("PesaWay B2C payout requires provider_payload.phone_number.")
             return event_slug, {
-                "phone_number": str(destination.get("phone_number") or "").strip(),
-                "channel": destination.get("channel") or "MPESA",
+                "phone_number": phone_number,
+                "channel": self._pesaway_mobile_channel(destination.get("channel")),
                 "reason": reason,
             }
         if destination.get("paybill_number"):
@@ -934,6 +944,12 @@ class PaymentInterface:
                 "reason": reason,
             }
         raise LedgerError("PesaWay payout requires a mobile, paybill, till, or bank destination.")
+
+    def _pesaway_mobile_channel(self, channel):
+        channel = str(channel or "MPESA").strip()
+        if channel not in {"MPESA", "Airtel"}:
+            raise LedgerError("PesaWay mobile channel must be exactly MPESA or Airtel.")
+        return channel
 
     def _normalize_microservice_payload(self, payload, *, payment_request=None):
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
