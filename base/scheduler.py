@@ -54,7 +54,10 @@ def _run_forever():
         for command_name in COMMANDS:
             try:
                 close_old_connections()
-                call_command(command_name, verbosity=0)
+                command_options = {"verbosity": 0}
+                if command_name == "reconcile_processing_payments":
+                    command_options["query_status"] = True
+                call_command(command_name, **command_options)
                 logger.info("background.command.success command=%s", command_name)
             except Exception:
                 logger.exception("background.command.failed command=%s", command_name)

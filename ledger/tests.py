@@ -14,6 +14,7 @@ from eusers.models import User
 from .models import Account, BalanceLogEntry, PaymentRequest, Transaction
 from .services import (
     IdempotencyConflict,
+    LedgerError,
     PaymentInterface,
     complete_pay_in,
     complete_payout,
@@ -177,6 +178,23 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.request_id, "IN-STK-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
 
+        PaymentInterface().handle_webhook(
+            {
+                "event": "inbound_payment.captured",
+                "inbound_payment_id": "IN-STK-001",
+                "status": "CAPTURED",
+                "external_reference": payment_request.originator_ref,
+                "provider_transaction_id": "MPESA-RECEIPT-001",
+            }
+        )
+        payment_request.refresh_from_db()
+        payment_request.transaction.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(payment_request.transaction.status, Transaction.Status.COMPLETED)
+        self.assertEqual(payment_request.transaction.transaction_receipt, "MPESA-RECEIPT-001")
+        self.assertEqual(self.account.available_balance_minor, 50000)
+
     def test_payment_interface_live_paybill_payout_uses_lipasync_b2b_payload(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-B2B-001"))
         response_payload = {
@@ -235,6 +253,99 @@ class LedgerServiceTests(TestCase):
         self.assertNotIn("callback_url", payload)
         self.assertEqual(payment_request.request_id, "OUT-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="qb",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+        PESAWAY_B2B_EVENT_SLUG="b2b",
+        PESAWAY_BANK_EVENT_SLUG="bank-transfer",
+    )
+    def test_pesaway_outbound_payloads_match_all_event_contracts(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=400000, reference="FUND-PESAWAY-ROUTES"))
+        cases = (
+            (
+                {"phone_number": "254700900002", "channel": "Airtel", "reason": "Airtel payout"},
+                "/outbound-transfers/qb/b2c/initiate/",
+                {"phone_number": "254700900002", "channel": "Airtel", "reason": "Airtel payout"},
+            ),
+            (
+                {"paybill_number": "123456", "reason": "Supplier payment"},
+                "/outbound-transfers/qb/b2b/initiate/",
+                {"account_number": "123456", "channel": "MPESA Paybill", "reason": "Supplier payment"},
+            ),
+            (
+                {"till_number": "654321", "reason": "Merchant payment"},
+                "/outbound-transfers/qb/b2b/initiate/",
+                {"account_number": "654321", "channel": "MPESA Till", "reason": "Merchant payment"},
+            ),
+            (
+                {"account_number": "0123456789", "bank_name": "KCB", "reason": "Salary payment"},
+                "/outbound-transfers/qb/bank-transfer/initiate/",
+                {"account_number": "0123456789", "bank_name": "KCB", "reason": "Salary payment"},
+            ),
+        )
+
+        for index, (destination, expected_path, expected_provider_payload) in enumerate(cases, start=1):
+            response_payload = {
+                "success": True,
+                "data": {"outbound_transfer_id": f"OUT-ROUTE-{index}", "status": "QUEUED"},
+            }
+            with self.subTest(destination=destination), patch.object(
+                PaymentInterface,
+                "_post",
+                return_value=response_payload,
+            ) as post:
+                payment_request = PaymentInterface(
+                    sandbox=False,
+                    base_url="https://payments.lipasync.com/api/v1/core",
+                ).initiate_payout(self.account, amount_minor=50000, destination=destination)
+
+                path, payload = post.call_args.args
+                self.assertEqual(path, expected_path)
+                self.assertEqual(payload["amount"], "500.00")
+                self.assertEqual(payload["idempotency_key"], payment_request.originator_ref)
+                self.assertEqual(payload["external_reference"], payment_request.originator_ref)
+                self.assertEqual(payload["provider_payload"], expected_provider_payload)
+                self.assertNotIn("currency", payload)
+                self.assertNotIn("recipient_type", payload)
+                self.assertNotIn("payment_method_type", payload)
+
+    @override_settings(PESAWAY_SYSTEM_SLUG="qb", PESAWAY_B2C_EVENT_SLUG="b2c")
+    def test_pesaway_rejects_invalid_mobile_channel(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-CHANNEL"))
+
+        with self.assertRaisesMessage(LedgerError, "mobile channel must be exactly MPESA or Airtel"):
+            PaymentInterface(
+                sandbox=False,
+                base_url="https://payments.lipasync.com/api/v1/core",
+            ).initiate_payout(
+                self.account,
+                amount_minor=50000,
+                destination={"phone_number": "254700900001", "channel": "AIRTEL"},
+            )
+
+    def test_pesaway_requests_use_api_key_header_without_bearer_auth(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"success":true,"data":{"status":"QUEUED"}}'
+
+        interface = PaymentInterface(
+            sandbox=False,
+            base_url="https://payments.lipasync.com/api/v1/core",
+            api_key="pesaway-api-key",
+        )
+        with patch("ledger.services.request.urlopen", return_value=FakeResponse()) as urlopen:
+            interface._get("/outbound-transfers/00000000-0000-0000-0000-000000000000/status/")
+
+        outgoing_request = urlopen.call_args.args[0]
+        self.assertEqual(outgoing_request.get_header("X-api-key"), "pesaway-api-key")
+        self.assertIsNone(outgoing_request.get_header("Authorization"))
 
     @override_settings(
         PESAWAY_SYSTEM_SLUG="qb",
@@ -339,6 +450,23 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(tx.transaction_receipt, "TX-CAPTURED-001")
         self.assertEqual(self.account.available_balance_minor, 50000)
 
+        entry_count = BalanceLogEntry.objects.filter(balance_log__transaction=tx).count()
+        PaymentInterface().handle_webhook(
+            {
+                "event": "payment.failed",
+                "payment_intent_id": "PI-CAPTURED-001",
+                "status": "FAILED",
+                "failure_reason": "Late conflicting callback",
+            }
+        )
+        payment_request.refresh_from_db()
+        tx.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(tx.status, Transaction.Status.COMPLETED)
+        self.assertEqual(self.account.available_balance_minor, 50000)
+        self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=tx).count(), entry_count)
+
     @override_settings(PESAWAY_WEBHOOK_SECRET="callback-secret")
     def test_payment_webhook_rejects_invalid_signature(self):
         response = self.client.post(
@@ -404,6 +532,55 @@ class LedgerServiceTests(TestCase):
         self.assertIn("timed out after 180 seconds", payment_request.last_error)
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertIn("timed out after 180 seconds", tx.failure_reason)
+
+    def test_pesaway_reconciliation_completes_successful_outbound_transfer(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-STATUS-001"))
+        tx = initiate_payout(self.account, amount_minor=75000, reference="PAYOUT-STATUS-001")
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.PAYOUT,
+            originator_ref="REQ-STATUS-001",
+            request_id="00000000-0000-0000-0000-000000000001",
+            request_payload={
+                "originator_ref": "REQ-STATUS-001",
+                "operation": PaymentRequest.Operation.PAYOUT,
+                "destination": {"phone_number": "254700900001"},
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+        PaymentRequest.objects.filter(id=payment_request.id).update(
+            created_at=timezone.now() - timezone.timedelta(minutes=4)
+        )
+        status_response = {
+            "success": True,
+            "message": "Outbound transfer retrieved",
+            "data": {
+                "outbound_transfer_id": payment_request.request_id,
+                "status": "SUCCESS",
+                "external_reference": payment_request.originator_ref,
+                "provider_transaction_id": "PHY123456",
+            },
+        }
+        interface = PaymentInterface(
+            sandbox=False,
+            base_url="https://payments.lipasync.com/api/v1/core",
+        )
+        with patch.object(interface, "_get", return_value=status_response) as get:
+            processed = interface.retry_stale_processing(query_status=True)
+
+        self.assertEqual(processed, 1)
+        get.assert_called_once_with(
+            f"/outbound-transfers/{payment_request.request_id}/status/"
+        )
+        payment_request.refresh_from_db()
+        tx.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(tx.status, Transaction.Status.COMPLETED)
+        self.assertEqual(tx.transaction_receipt, "PHY123456")
+        self.assertEqual(self.account.available_balance_minor, 25000)
+        self.assertEqual(self.account.reserved_balance_minor, 0)
 
     def test_retry_stale_processing_does_not_query_lipasync_without_status_endpoint(self):
         tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-LIPASYNC-TIMEOUT-001")
