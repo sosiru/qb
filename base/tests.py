@@ -36,7 +36,7 @@ from .services import (
 )
 
 
-class QuickBundlPlatformTests(TestCase):
+class RatibaPlatformTests(TestCase):
     fixtures = ["notification_templates.json"]
 
     def setUp(self):
@@ -263,7 +263,7 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(response.json()["user"]["default_payment_mode"], "STK")
         self.assertFalse(response.json()["user"]["sms_notifications_enabled"])
 
-        response = self._post("/api/v1/wallets/topups/", {"amount_minor": 150000}, token=token)
+        response = self._post("/api/v1/wallets/topups/", {"amount_minor": 150000, "simulate": True}, token=token)
         self.assertEqual(response.status_code, 200)
 
         response = self.client.get("/api/v1/wallets/ledger/", HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -271,8 +271,8 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(len(response.json()["entries"]), 1)
         entry = response.json()["entries"][0]
         self.assertEqual(entry["entry_type"], "TOP_UP")
-        self.assertEqual(entry["description"], "Top up of funds")
-        self.assertTrue(entry["reference"].startswith("QB"))
+        self.assertEqual(entry["description"], "STK push wallet top-up")
+        self.assertTrue(entry["reference"].startswith("STK"))
         self.assertNotIn("topup:", entry["reference"])
         self.assertNotIn("vault-transfer:", entry["reference"])
 
@@ -761,7 +761,7 @@ class QuickBundlPlatformTests(TestCase):
                 "password": "StrongPass123!",
                 "full_name": "Finance Admin",
                 "account_type": "CORPORATE",
-                "organization_name": "Quick Bundl",
+                "organization_name": "Ratiba",
             },
         )
         admin_token = admin_response.json()["token"]
@@ -846,7 +846,7 @@ class QuickBundlPlatformTests(TestCase):
                 "password": "StrongPass123!",
                 "full_name": "Ops Admin",
                 "account_type": "CORPORATE",
-                "organization_name": "Quick Bundl Corp",
+                "organization_name": "Ratiba Corp",
             },
         )
         admin_token = admin_response.json()["token"]
@@ -1077,7 +1077,7 @@ class QuickBundlPlatformTests(TestCase):
         NOTIFY_API_KEY="notify-key",
         NOTIFY_SYSTEM="radicrunch",
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
-        DEFAULT_FROM_EMAIL="Quick Bundl <mvpmtech@gmail.com>",
+        DEFAULT_FROM_EMAIL="Ratiba <mvpmtech@gmail.com>",
     )
     def test_process_notifications_dispatches_sms_and_email(self):
         user = User.objects.create_user(
@@ -1134,7 +1134,7 @@ class QuickBundlPlatformTests(TestCase):
         NOTIFY_URL="https://notify.example/api/send",
         NOTIFY_API_KEY="notify-key",
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
-        DEFAULT_FROM_EMAIL="Quick Bundl <mvpmtech@gmail.com>",
+        DEFAULT_FROM_EMAIL="Ratiba <mvpmtech@gmail.com>",
     )
     def test_sms_dispatch_failure_does_not_break_notification_worker(self):
         user = User.objects.create_user(
@@ -1291,7 +1291,7 @@ class QuickBundlPlatformTests(TestCase):
 
         response = self._post(
             "/api/v1/organizations/",
-            {"name": "Quick Bundl Ops"},
+            {"name": "Ratiba Ops"},
             token=token,
         )
         self.assertEqual(response.status_code, 201)

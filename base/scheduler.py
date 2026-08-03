@@ -24,7 +24,7 @@ _lock = threading.Lock()
 
 
 def should_start_scheduler():
-    if os.environ.get("QB_BACKGROUND_COMMANDS_ENABLED", "1") != "1":
+    if os.environ.get("RATIBA_BACKGROUND_COMMANDS_ENABLED", "1") != "1":
         return False
     if "test" in sys.argv or "migrate" in sys.argv or "makemigrations" in sys.argv:
         return False
@@ -32,7 +32,7 @@ def should_start_scheduler():
         return False
     if "runserver" in sys.argv:
         return os.environ.get("RUN_MAIN") == "true"
-    return os.environ.get("QB_FORCE_BACKGROUND_COMMANDS", "0") == "1"
+    return os.environ.get("RATIBA_FORCE_BACKGROUND_COMMANDS", "0") == "1"
 
 
 def start_background_commands():
@@ -42,7 +42,7 @@ def start_background_commands():
     with _lock:
         if _started:
             return
-        thread = threading.Thread(target=_run_forever, name="qb-background-commands", daemon=True)
+        thread = threading.Thread(target=_run_forever, name="ratiba-background-commands", daemon=True)
         thread.start()
         _started = True
         logger.info("background.commands.started interval_seconds=%s commands=%s", INTERVAL_SECONDS, ",".join(COMMANDS))

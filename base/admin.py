@@ -530,6 +530,6 @@ class ReportExportAdmin(TimestampedAdminMixin, admin.ModelAdmin):
     autocomplete_fields = ("requested_by", "organization")
 
 
-admin.site.site_header = "Quick Bundl Administration"
-admin.site.site_title = "Quick Bundl Admin"
+admin.site.site_header = "Ratiba Administration"
+admin.site.site_title = "Ratiba Admin"
 admin.site.index_title = "Operations Console"

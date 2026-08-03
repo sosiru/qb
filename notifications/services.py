@@ -122,7 +122,7 @@ def queue_email_notification(recipients, event_type, context=None, scheduled_for
 def build_notification_payload(event):
     return {
         "unique_identifier": event.unique_identifier,
-        "system": settings.NOTIFY_SYSTEM or event.template.system or "qb",
+        "system": settings.NOTIFY_SYSTEM or event.template.system or "ratiba",
         "recipients": event.recipients,
         "notification_type": event.channel.lower(),
         "template": event.template.provider_template,
@@ -142,14 +142,14 @@ def _event_view_model(event):
     user_name = context.get("user_name") or (event.user.full_name if event.user_id else "") or "there"
     amount = context.get("total_amount_minor") or context.get("amount_minor")
     details = []
-    cta_label = context.get("cta_label") or "Open Quick Bundl"
+    cta_label = context.get("cta_label") or "Open Ratiba"
     cta_url = context.get("cta_url") or context.get("invite_link") or getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200")
-    title = context.get("title") or "Quick Bundl notification"
-    intro = context.get("intro") or "A Quick Bundl activity update is available for your account."
+    title = context.get("title") or "Ratiba notification"
+    intro = context.get("intro") or "A Ratiba activity update is available for your account."
     badge = context.get("badge") or event.event_type.replace("_", " ").title()
 
     if event.event_type == "SELF_ONBOARDING":
-        title = "Welcome to Quick Bundl"
+        title = "Welcome to Ratiba"
         intro = "Your account is ready. You can now manage wallets, payees, scheduled payments, approvals, and reports from one secure workspace."
         badge = "Account Created"
         details = [
@@ -158,7 +158,7 @@ def _event_view_model(event):
             ("Account type", str(context.get("account_type", "")).replace("_", " ").title()),
         ]
     elif event.event_type == "LOGIN_OTP":
-        title = "Your Quick Bundl login code"
+        title = "Your Ratiba login code"
         intro = "Use this one-time code to complete your login. Do not share it with anyone."
         badge = "Secure Login"
         cta_label = "Continue login"
@@ -168,7 +168,7 @@ def _event_view_model(event):
             ("Phone", context.get("phone_number", "")),
         ]
     elif event.event_type == "LOGIN_SUCCESS":
-        title = "New Quick Bundl login"
+        title = "New Ratiba login"
         intro = "A login to your account was completed. If this was not you, change your password immediately."
         badge = "Login Complete"
         details = [
@@ -177,8 +177,8 @@ def _event_view_model(event):
             ("Time", context.get("login_time", "")),
         ]
     elif event.event_type == "ORGANIZATION_INVITE":
-        title = f"You're invited to {context.get('organization_name', 'Quick Bundl')}"
-        intro = f"{context.get('invited_by', 'A team admin')} invited you to join Quick Bundl as {context.get('role', 'a member')}."
+        title = f"You're invited to {context.get('organization_name', 'Ratiba')}"
+        intro = f"{context.get('invited_by', 'A team admin')} invited you to join Ratiba as {context.get('role', 'a member')}."
         badge = "Team Invite"
         cta_label = "Accept invite"
         details = [
@@ -287,8 +287,8 @@ def _event_view_model(event):
             ("Reason", context.get("reason", "")),
         ]
     elif event.event_type == "PRODUCT_UPDATE":
-        title = context.get("title") or "Quick Bundl update"
-        intro = context.get("intro") or context.get("body") or "A new Quick Bundl update is available."
+        title = context.get("title") or "Ratiba update"
+        intro = context.get("intro") or context.get("body") or "A new Ratiba update is available."
         badge = context.get("badge") or "Product Update"
         cta_label = context.get("cta_label") or "View update"
 
@@ -297,7 +297,7 @@ def _event_view_model(event):
         details.extend(tuple(item) for item in extra_details if isinstance(item, (list, tuple)) and len(item) == 2)
 
     return {
-        "brand_name": "Quick Bundl",
+        "brand_name": "Ratiba",
         "title": title,
         "intro": intro,
         "badge": badge,
@@ -441,10 +441,10 @@ def ensure_product_update_template():
         defaults={
             "event_type": "PRODUCT_UPDATE",
             "channel": "IN_APP",
-            "system": "qb",
+            "system": "ratiba",
             "provider_template": "in_app_product_update",
             "subject_template": "",
-            "description": "In-app announcement for major Quick Bundl updates.",
+            "description": "In-app announcement for major Ratiba updates.",
             "default_context": {"badge": "Product Update"},
             "active": True,
         },

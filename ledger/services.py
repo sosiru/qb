@@ -455,12 +455,14 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
 
 class PaymentInterface:
     PROCESSING_TIMEOUT_SECONDS = 180
-    LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "SETTLED"}
-    LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED"}
+    LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "SETTLED", "SUCCESS"}
+    LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED", "MANUAL_REVIEW"}
     LIPASYNC_PENDING_STATUSES = {
         "INITIATED",
+        "QUEUED",
         "REQUIRES_ACTION",
         "PROCESSING",
+        "PENDING",
         "AUTHORIZED",
         "PARTIALLY_CAPTURED",
         "PARTIALLY_REFUNDED",
@@ -569,6 +571,9 @@ class PaymentInterface:
                 extra_payload,
                 originator_ref=originator_ref,
             )
+            callback_url = getattr(settings, "PAYMENT_CALLBACK_URL", "").strip()
+            if callback_url:
+                provider_payload["callback_url"] = callback_url
         stored_payload = {
             "originator_ref": originator_ref,
             "external_reference": originator_ref,
@@ -577,7 +582,8 @@ class PaymentInterface:
             "amount": provider_payload["amount"],
             "currency": tx.currency,
             "operation": operation,
-            "payment_payload": provider_payload["payment_payload"],
+            "payment_payload": provider_payload.get("payment_payload") or provider_payload.get("provider_payload") or {},
+            "provider_path": provider_path,
             "metadata": metadata,
             **extra_payload,
         }
@@ -613,6 +619,15 @@ class PaymentInterface:
         return payment_request
 
     def query_status(self, payment_request):
+        if self._is_pesaway_core() and payment_request.operation == PaymentRequest.Operation.PAYOUT and payment_request.request_id:
+            response_payload = self._get(f"/outbound-transfers/{payment_request.request_id}/status/")
+            payment_request.last_query_at = timezone.now()
+            payment_request.response_payload = response_payload
+            payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
+            normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
+            if "success" in normalized_payload:
+                self.handle_webhook({**response_payload, **normalized_payload})
+            return response_payload
         payload = {"originator_ref": payment_request.originator_ref, "request_id": payment_request.request_id}
         response_payload = self._post("/transactions/status/", payload)
         payment_request.last_query_at = timezone.now()
@@ -762,8 +777,9 @@ class PaymentInterface:
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
             headers["X-Api-Key"] = self.api_key
+            if not self._is_pesaway_core():
+                headers["Authorization"] = f"Bearer {self.api_key}"
         req = request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
         try:
             with request.urlopen(req, timeout=self.timeout) as response:
@@ -779,10 +795,35 @@ class PaymentInterface:
         except error.URLError as exc:
             raise LedgerError(str(exc.reason)) from exc
 
+    def _get(self, path):
+        if not self.base_url:
+            raise LedgerError("PAYMENT_MICROSERVICE_URL is not configured.")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
+            if not self._is_pesaway_core():
+                headers["Authorization"] = f"Bearer {self.api_key}"
+        req = request.Request(f"{self.base_url}{path}", headers=headers, method="GET")
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except ValueError:
+                parsed = {"raw": raw}
+            raise LedgerError(f"Payment microservice returned HTTP {exc.code}: {parsed}") from exc
+        except error.URLError as exc:
+            raise LedgerError(str(exc.reason)) from exc
+
     def _supports_status_query(self):
-        return "lipasync.com" not in self.base_url and "/core/payments/qb" not in self.base_url
+        return self._is_pesaway_core() or ("lipasync.com" not in self.base_url and "/core/payments/qb" not in self.base_url)
 
     def _lipasync_initiate_request(self, tx, operation, extra_payload, *, originator_ref):
+        if self._is_pesaway_core():
+            return self._pesaway_initiate_request(tx, operation, extra_payload, originator_ref=originator_ref)
         if operation == PaymentRequest.Operation.STK_PUSH:
             return (
                 "/stk-push/initiate/",
@@ -816,6 +857,84 @@ class PaymentInterface:
             )
         raise LedgerError(f"Lipasync does not support payment operation {operation}.")
 
+    def _pesaway_initiate_request(self, tx, operation, extra_payload, *, originator_ref):
+        system_slug = getattr(settings, "PESAWAY_SYSTEM_SLUG", "")
+        if not system_slug:
+            raise LedgerError("PESAWAY_SYSTEM_SLUG is not configured.")
+        if operation == PaymentRequest.Operation.STK_PUSH:
+            event_slug = getattr(settings, "PESAWAY_COLLECTION_EVENT_SLUG", "")
+            if not event_slug:
+                raise LedgerError("PESAWAY_COLLECTION_EVENT_SLUG is not configured.")
+            phone_number = str(extra_payload.get("phone_number") or "").strip()
+            if not phone_number:
+                raise LedgerError("PesaWay collection requires provider_payload.phone_number.")
+            return (
+                f"/inbound-payments/{system_slug}/{event_slug}/initiate/",
+                {
+                    "amount": self._amount_major_string(tx.amount_minor),
+                    "idempotency_key": originator_ref,
+                    "external_reference": originator_ref,
+                    "provider_payload": {
+                        "phone_number": phone_number,
+                        "channel": extra_payload.get("channel") or "MPESA",
+                        "reason": extra_payload.get("reason") or "Wallet top-up",
+                    },
+                },
+            )
+        if operation == PaymentRequest.Operation.PAYOUT:
+            event_slug, provider_payload = self._pesaway_outbound_payload(extra_payload.get("destination") or {})
+            return (
+                f"/outbound-transfers/{system_slug}/{event_slug}/initiate/",
+                {
+                    "amount": self._amount_major_string(tx.amount_minor),
+                    "idempotency_key": originator_ref,
+                    "external_reference": originator_ref,
+                    "provider_payload": provider_payload,
+                },
+            )
+        raise LedgerError(f"PesaWay does not support payment operation {operation}.")
+
+    def _pesaway_outbound_payload(self, destination):
+        destination_type = str(destination.get("type") or "").upper()
+        reason = destination.get("reason") or "Ratiba payout"
+        if destination.get("phone_number") or destination_type in {"MPESA", "MOBILE", "B2C"}:
+            event_slug = getattr(settings, "PESAWAY_B2C_EVENT_SLUG", "")
+            if not event_slug:
+                raise LedgerError("PESAWAY_B2C_EVENT_SLUG is not configured.")
+            return event_slug, {
+                "phone_number": str(destination.get("phone_number") or "").strip(),
+                "channel": destination.get("channel") or "MPESA",
+                "reason": reason,
+            }
+        if destination.get("paybill_number"):
+            event_slug = getattr(settings, "PESAWAY_B2B_EVENT_SLUG", "")
+            if not event_slug:
+                raise LedgerError("PESAWAY_B2B_EVENT_SLUG is not configured.")
+            return event_slug, {
+                "account_number": str(destination.get("paybill_number") or "").strip(),
+                "channel": "MPESA Paybill",
+                "reason": reason,
+            }
+        if destination.get("till_number"):
+            event_slug = getattr(settings, "PESAWAY_B2B_EVENT_SLUG", "")
+            if not event_slug:
+                raise LedgerError("PESAWAY_B2B_EVENT_SLUG is not configured.")
+            return event_slug, {
+                "account_number": str(destination.get("till_number") or "").strip(),
+                "channel": "MPESA Till",
+                "reason": reason,
+            }
+        if destination.get("account_number") and destination.get("bank_name"):
+            event_slug = getattr(settings, "PESAWAY_BANK_EVENT_SLUG", "")
+            if not event_slug:
+                raise LedgerError("PESAWAY_BANK_EVENT_SLUG is not configured.")
+            return event_slug, {
+                "account_number": str(destination.get("account_number") or "").strip(),
+                "bank_name": str(destination.get("bank_name") or "").strip(),
+                "reason": reason,
+            }
+        raise LedgerError("PesaWay payout requires a mobile, paybill, till, or bank destination.")
+
     def _normalize_microservice_payload(self, payload, *, payment_request=None):
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         status = str(payload.get("status") or data.get("status") or "").upper()
@@ -832,7 +951,11 @@ class PaymentInterface:
             "request_id": str(
                 payload.get("request_id")
                 or payload.get("payment_intent_id")
+                or payload.get("inbound_payment_id")
+                or payload.get("outbound_transfer_id")
                 or data.get("payment_intent_id")
+                or data.get("inbound_payment_id")
+                or data.get("outbound_transfer_id")
                 or data.get("request_id")
                 or data.get("id")
                 or (payment_request.request_id if payment_request else "")
@@ -841,33 +964,45 @@ class PaymentInterface:
             "transaction_receipt": str(
                 payload.get("transaction_receipt")
                 or payload.get("transaction_id")
+                or payload.get("provider_transaction_id")
                 or data.get("transaction_id")
+                or data.get("provider_transaction_id")
                 or data.get("payment_intent_id")
                 or ""
             ),
             "confirmation_key": str(payload.get("confirmation_key") or ""),
             "status": status,
         }
-        if "success" in payload:
-            normalized["success"] = bool(payload.get("success"))
-            return normalized
-        if status in self.LIPASYNC_SUCCESS_STATUSES or event in {"payment.captured", "payment.settled"}:
+        if status in self.LIPASYNC_SUCCESS_STATUSES or event in {"payment.captured", "payment.settled", "inbound_payment.captured", "inbound_payment.settled", "outbound_transfer.success"}:
             normalized["success"] = True
         elif status in self.LIPASYNC_FAILURE_STATUSES or event in {
             "payment.failed",
             "payment.cancelled",
             "payment.refunded",
+            "inbound_payment.failed",
+            "outbound_transfer.failed",
         }:
             normalized["success"] = False
             reason = payload.get("failure_reason") or payload.get("message") or payload.get("error")
             normalized["failure_reason"] = str(reason or f"Payment {status.lower() or event.split('.')[-1]}")[:255]
             normalized["error"] = normalized["failure_reason"]
+        elif "success" in payload and status not in self.LIPASYNC_PENDING_STATUSES:
+            normalized["success"] = bool(payload.get("success"))
         return normalized
 
     def _amount_major(self, amount_minor):
         return float((Decimal(int(amount_minor)) / Decimal("100")).quantize(Decimal("0.01")))
 
+    def _amount_major_string(self, amount_minor):
+        return str((Decimal(int(amount_minor)) / Decimal("100")).quantize(Decimal("0.01")))
+
+    def _is_pesaway_core(self):
+        return self.base_url.rstrip("/").endswith("/api/v1/core")
+
     def _validate_lipasync_payout_destination(self, destination):
+        if self._is_pesaway_core():
+            self._pesaway_outbound_payload(destination)
+            return
         if not self._paybill_shortcode(destination):
             raise LedgerError("Lipasync B2B payout requires destination.paybill_number or destination.destination_shortcode.")
 

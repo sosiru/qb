@@ -1,13 +1,13 @@
 # Payment Microservice Sample Requests and Responses
 
-This document describes the payment microservice contract used by Quick Bundl.
+This document describes the payment microservice contract used by Ratiba.
 
-Quick Bundl calls the configured `PAYMENT_MICROSERVICE_URL` with:
+Ratiba calls the configured `PAYMENT_MICROSERVICE_URL` with:
 
 - `POST /transactions/initiate/`
 - `POST /transactions/status/`
 
-The microservice calls Quick Bundl back with:
+The microservice calls Ratiba back with:
 
 - `POST /api/v1/payments/webhook/`
 
@@ -17,9 +17,11 @@ The microservice calls Quick Bundl back with:
 PAYMENT_MICROSERVICE_URL=http://localhost:8001
 PAYMENT_MICROSERVICE_API_KEY=dummy-payment-api-key
 PAYMENT_MICROSERVICE_TIMEOUT_SECONDS=30
+PAYMENT_CALLBACK_URL=https://qb.lipasync.com/api/v1/payments/webhook/
+PAYMENT_WEBHOOK_SECRET=replace-with-a-random-secret
 ```
 
-Quick Bundl sends the API key as a Bearer token:
+Ratiba sends the API key as a Bearer token:
 
 ```http
 Authorization: Bearer dummy-payment-api-key
@@ -38,7 +40,7 @@ Amounts are integer minor units. For KES, `100000` means KES 1,000.00.
 
 ## Initiate STK Push
 
-Quick Bundl sends this when collecting money from a user, for example wallet top-up or STK-funded batch payment.
+Ratiba sends this when collecting money from a user, for example wallet top-up or STK-funded batch payment.
 
 ### Request
 
@@ -68,11 +70,11 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 }
 ```
 
-Quick Bundl stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value. If a request stays in `PROCESSING` for more than 3 minutes, Quick Bundl fails it locally with a timeout failure reason.
+Ratiba stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value. If a request stays in `PROCESSING` for more than 3 minutes, Ratiba fails it locally with a timeout failure reason.
 
 ## Initiate Payout
 
-Quick Bundl sends this when dispatching a payment instruction to a mobile wallet, till, paybill, or bank destination.
+Ratiba sends this when dispatching a payment instruction to a mobile wallet, till, paybill, or bank destination.
 
 ### Request
 
@@ -159,7 +161,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 
 ## Query Transaction Status
 
-Quick Bundl calls this for payment requests that remain in `PROCESSING`. Requests that are still not final after 3 minutes are failed locally.
+Ratiba calls this for payment requests that remain in `PROCESSING`. Requests that are still not final after 3 minutes are failed locally.
 
 ### Request
 
@@ -184,7 +186,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/status/" \
 }
 ```
 
-If the response does not contain `success`, Quick Bundl treats it as informational and keeps the local payment request open until the 3-minute processing timeout is reached.
+If the response does not contain `success`, Ratiba treats it as informational and keeps the local payment request open until the 3-minute processing timeout is reached.
 
 ### Completed Response
 
@@ -213,11 +215,11 @@ If the response does not contain `success`, Quick Bundl treats it as information
 }
 ```
 
-Failure responses should include at least one human-readable reason field. Quick Bundl checks `failure_reason`, then `message`, then `error`.
+Failure responses should include at least one human-readable reason field. Ratiba checks `failure_reason`, then `message`, then `error`.
 
 ## Processing Timeout
 
-Quick Bundl fails any payment request that remains in `PROCESSING` for more than 180 seconds.
+Ratiba fails any payment request that remains in `PROCESSING` for more than 180 seconds.
 
 Run the reconciliation command periodically, for example every minute:
 
@@ -244,23 +246,27 @@ Timeout failure reasons are written to:
 - `base.PaymentInstruction.failure_reason`, for payout instruction requests
 - the batch failure metadata/event trail, for batch collection requests
 
-## Callback to Quick Bundl
+## Callback to Ratiba
 
 The microservice should send a callback when the provider reaches a final state.
+Ratiba includes `callback_url` in every live payment initiation request. The URL
+must be publicly reachable over HTTPS; a localhost URL cannot receive callbacks
+from a remote payment service.
 
 Callback URL:
 
 ```text
-POST https://quickbundl.example.com/api/v1/payments/webhook/
+POST https://ratiba.example.com/api/v1/payments/webhook/
 ```
 
-At least one of `originator_ref` or `request_id` is required. `originator_ref` is preferred because Quick Bundl creates it before dispatching the request.
+At least one of `originator_ref` or `request_id` is required. `originator_ref` is preferred because Ratiba creates it before dispatching the request.
 
 ### Successful Callback
 
 ```bash
-curl -X POST "https://quickbundl.example.com/api/v1/payments/webhook/" \
+curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: replace-with-a-random-secret" \
   -d '{
     "success": true,
     "originator_ref": "REQ-20260712-000042",
@@ -272,7 +278,7 @@ curl -X POST "https://quickbundl.example.com/api/v1/payments/webhook/" \
   }'
 ```
 
-### Quick Bundl Response
+### Ratiba Response
 
 ```json
 {
@@ -285,8 +291,9 @@ curl -X POST "https://quickbundl.example.com/api/v1/payments/webhook/" \
 ### Failed Callback
 
 ```bash
-curl -X POST "https://quickbundl.example.com/api/v1/payments/webhook/" \
+curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: replace-with-a-random-secret" \
   -d '{
     "success": false,
     "originator_ref": "REQ-20260712-000042",
@@ -297,7 +304,7 @@ curl -X POST "https://quickbundl.example.com/api/v1/payments/webhook/" \
   }'
 ```
 
-### Quick Bundl Response
+### Ratiba Response
 
 ```json
 {
@@ -337,25 +344,26 @@ Content-Type: application/json
 }
 ```
 
-Quick Bundl records non-2xx responses as dispatch failures, including the response body in the local error message.
+Ratiba records non-2xx responses as dispatch failures, including the response body in the local error message.
 
 ## Field Reference
 
 | Field | Direction | Required | Notes |
 | --- | --- | --- | --- |
-| `originator_ref` | Quick Bundl to microservice | Yes | Unique Quick Bundl request reference. Echo it in every response and callback. |
-| `request_id` | Microservice to Quick Bundl | Recommended | Microservice/provider tracking ID. |
-| `amount_minor` | Quick Bundl to microservice | Yes | Integer amount in minor units. |
-| `currency` | Quick Bundl to microservice | Yes | Usually `KES`. |
-| `operation` | Quick Bundl to microservice | Yes | `STK_PUSH`, `PAY_IN`, or `PAYOUT`. |
-| `phone_number` | Quick Bundl to microservice | Required for `STK_PUSH` | Normalized international format, for example `254700900001`. |
-| `destination` | Quick Bundl to microservice | Required for `PAYOUT` | Recipient-specific routing details. |
-| `success` | Microservice to Quick Bundl | Required for final state | `true` completes the transaction; `false` fails it. Omit while still processing. |
-| `transaction_receipt` | Microservice to Quick Bundl | Recommended on success | Used as the visible microservice reference. |
-| `confirmation_key` | Microservice to Quick Bundl | Optional | Stored on completed ledger transactions. |
-| `message` | Microservice to Quick Bundl | Optional | Human-readable status detail. |
-| `failure_reason` | Microservice to Quick Bundl | Recommended on failure | Preferred human-readable failure reason. |
-| `error` | Microservice to Quick Bundl | Recommended on failure | Fallback human-readable failure reason. |
+| `originator_ref` | Ratiba to microservice | Yes | Unique Ratiba request reference. Echo it in every response and callback. |
+| `request_id` | Microservice to Ratiba | Recommended | Microservice/provider tracking ID. |
+| `amount_minor` | Ratiba to microservice | Yes | Integer amount in minor units. |
+| `currency` | Ratiba to microservice | Yes | Usually `KES`. |
+| `operation` | Ratiba to microservice | Yes | `STK_PUSH`, `PAY_IN`, or `PAYOUT`. |
+| `phone_number` | Ratiba to microservice | Required for `STK_PUSH` | Normalized international format, for example `254700900001`. |
+| `destination` | Ratiba to microservice | Required for `PAYOUT` | Recipient-specific routing details. |
+| `callback_url` | Ratiba to microservice | Yes in live mode | Public endpoint that receives the final payment result. |
+| `success` | Microservice to Ratiba | Required for final state | `true` completes the transaction; `false` fails it. Omit while still processing. |
+| `transaction_receipt` | Microservice to Ratiba | Recommended on success | Used as the visible microservice reference. |
+| `confirmation_key` | Microservice to Ratiba | Optional | Stored on completed ledger transactions. |
+| `message` | Microservice to Ratiba | Optional | Human-readable status detail. |
+| `failure_reason` | Microservice to Ratiba | Recommended on failure | Preferred human-readable failure reason. |
+| `error` | Microservice to Ratiba | Recommended on failure | Fallback human-readable failure reason. |
 
 ## Implementation Notes
 

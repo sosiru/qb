@@ -362,7 +362,7 @@ Provides statement-style aggregates and rows for the UI:
 
 ## Payment microservice
 
-Quick Bundl dispatches real payment operations through the configured payment microservice.
+Ratiba dispatches real payment operations through the configured payment microservice.
 See `docs/payment-microservice.md` for sample requests, responses, callbacks, and status checks.
 
 ## Background commands

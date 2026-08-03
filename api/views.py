@@ -1,9 +1,11 @@
 import csv
 import hashlib
+import hmac
 import json
 import logging
 import uuid
 
+from django.conf import settings
 from django.db import IntegrityError, models, transaction
 from django.http import Http404, HttpResponse, JsonResponse
 from django.utils import timezone
@@ -471,7 +473,7 @@ def _handle_domain_error(exc):
 @api_view
 @require_auth
 def health_view(request):
-    return JsonResponse({"status": "ok", "service": "quick-bundl-backend"})
+    return JsonResponse({"status": "ok", "service": "ratiba-backend"})
 
 
 @api_view
@@ -1032,6 +1034,10 @@ def wallet_ledger_view(request):
 def payment_webhook_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
+    webhook_secret = getattr(settings, "PAYMENT_WEBHOOK_SECRET", "")
+    supplied_secret = request.headers.get("X-Webhook-Secret", "")
+    if webhook_secret and not hmac.compare_digest(supplied_secret, webhook_secret):
+        return json_error("Invalid webhook credentials.", status=401)
     try:
         payload = get_request_data(request)
         payment_request = PaymentInterface().handle_webhook(payload)
