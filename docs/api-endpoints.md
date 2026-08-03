@@ -48,7 +48,6 @@ Login is OTP-based:
 }
 ```
 
-For the default test account `254710956633`, the backend accepts any 6-digit OTP during login.
 
 ## Dashboard
 
