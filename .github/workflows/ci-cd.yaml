@@ -89,6 +89,22 @@ jobs:
           declare -A secrets=(
             [POSTGRES_PASSWORD]="${{ secrets.POSTGRES_PASSWORD }}"
             [DJANGO_SECRET_KEY]="${{ secrets.DJANGO_SECRET_KEY }}"
+            [PAYMENT_MICROSERVICE_URL]="${{ secrets.PAYMENT_MICROSERVICE_URL }}"
+            [PAYMENT_MICROSERVICE_API_KEY]="${{ secrets.PAYMENT_MICROSERVICE_API_KEY }}"
+            [PAYMENT_MICROSERVICE_SANDBOX]="${{ secrets.PAYMENT_MICROSERVICE_SANDBOX }}"
+            [PAYMENT_MICROSERVICE_TIMEOUT_SECONDS]="${{ secrets.PAYMENT_MICROSERVICE_TIMEOUT_SECONDS }}"
+            [PAYMENT_CALLBACK_URL]="${{ secrets.PAYMENT_CALLBACK_URL }}"
+            [PESAWAY_WEBHOOK_SECRET]="${{ secrets.PESAWAY_WEBHOOK_SECRET }}"
+            [PESAWAY_SYSTEM_SLUG]="${{ secrets.PESAWAY_SYSTEM_SLUG }}"
+            [PESAWAY_COLLECTION_EVENT_SLUG]="${{ secrets.PESAWAY_COLLECTION_EVENT_SLUG }}"
+            [PESAWAY_B2C_EVENT_SLUG]="${{ secrets.PESAWAY_B2C_EVENT_SLUG }}"
+            [PESAWAY_B2B_EVENT_SLUG]="${{ secrets.PESAWAY_B2B_EVENT_SLUG }}"
+            [PESAWAY_BANK_EVENT_SLUG]="${{ secrets.PESAWAY_BANK_EVENT_SLUG }}"
+            [NOTIFY]="${{ secrets.NOTIFY }}"
+            [NOTIFY_API_KEY]="${{ secrets.NOTIFY_API_KEY }}"
+            [NOTIFY_SYSTEM]="${{ secrets.NOTIFY_SYSTEM }}"
+            [NOTIFY_TIMEOUT_SECONDS]="${{ secrets.NOTIFY_TIMEOUT_SECONDS }}"
+            [NOTIFY_LOW_WALLET_THRESHOLD_MINOR]="${{ secrets.NOTIFY_LOW_WALLET_THRESHOLD_MINOR }}"
           )
 
           json="{}"

@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -230,8 +232,52 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payload["amount"], "1000.00")
         self.assertEqual(payload["provider_payload"]["phone_number"], "254700900001")
         self.assertEqual(payload["provider_payload"]["channel"], "MPESA")
+        self.assertNotIn("callback_url", payload)
         self.assertEqual(payment_request.request_id, "OUT-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="qb",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+    )
+    def test_pesaway_failed_webhook_fails_payout_and_releases_funds(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-FAIL"))
+        with patch.object(
+            PaymentInterface,
+            "_post",
+            return_value={
+                "success": True,
+                "data": {"outbound_transfer_id": "OUT-FAILED-001", "status": "QUEUED"},
+            },
+        ):
+            payment_request = PaymentInterface(
+                sandbox=False,
+                base_url="https://payments.lipasync.com/api/v1/core",
+            ).initiate_payout(
+                self.account,
+                amount_minor=75000,
+                destination={"phone_number": "254700900001"},
+            )
+
+        PaymentInterface().handle_webhook(
+            {
+                "event": "outbound_transfer.failed",
+                "outbound_transfer_id": "OUT-FAILED-001",
+                "status": "FAILED",
+                "external_reference": payment_request.originator_ref,
+                "failure_code": "RECIPIENT_REJECTED",
+                "failure_reason": "Recipient account could not be credited",
+            }
+        )
+
+        payment_request.refresh_from_db()
+        payment_request.transaction.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
+        self.assertEqual(payment_request.transaction.status, Transaction.Status.FAILED)
+        self.assertEqual(payment_request.last_error, "Recipient account could not be credited")
+        self.assertEqual(self.account.available_balance_minor, 100000)
+        self.assertEqual(self.account.reserved_balance_minor, 0)
 
     def test_lipasync_processing_callback_keeps_payment_processing(self):
         with patch.object(
@@ -293,19 +339,22 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(tx.transaction_receipt, "TX-CAPTURED-001")
         self.assertEqual(self.account.available_balance_minor, 50000)
 
-    @override_settings(PAYMENT_WEBHOOK_SECRET="callback-secret")
-    def test_payment_webhook_rejects_invalid_secret(self):
+    @override_settings(PESAWAY_WEBHOOK_SECRET="callback-secret")
+    def test_payment_webhook_rejects_invalid_signature(self):
         response = self.client.post(
             "/api/v1/payments/webhook/",
-            data={"success": True, "originator_ref": "STK-001"},
+            data=b'{"success":true,"originator_ref":"STK-001"}',
             content_type="application/json",
+            HTTP_X_WEBHOOK_SIGNATURE="invalid-signature",
         )
 
         self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["error"], "Invalid webhook credentials.")
+        self.assertEqual(response.json()["error"], "Invalid webhook signature.")
 
-    @override_settings(PAYMENT_WEBHOOK_SECRET="callback-secret")
-    def test_payment_webhook_accepts_configured_secret(self):
+    @override_settings(PESAWAY_WEBHOOK_SECRET="callback-secret")
+    def test_payment_webhook_accepts_valid_signature(self):
+        raw_payload = b'{"success":true,"originator_ref":"STK-001"}'
+        signature = hmac.new(b"callback-secret", raw_payload, hashlib.sha256).hexdigest()
         handled_request = SimpleNamespace(
             status=PaymentRequest.Status.COMPLETED,
             originator_ref="STK-001",
@@ -314,9 +363,9 @@ class LedgerServiceTests(TestCase):
         with patch("api.views.PaymentInterface.handle_webhook", return_value=handled_request) as handle_webhook:
             response = self.client.post(
                 "/api/v1/payments/webhook/",
-                data={"success": True, "originator_ref": "STK-001"},
+                data=raw_payload,
                 content_type="application/json",
-                HTTP_X_WEBHOOK_SECRET="callback-secret",
+                HTTP_X_WEBHOOK_SIGNATURE=signature,
             )
 
         self.assertEqual(response.status_code, 200)
