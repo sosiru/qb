@@ -19,14 +19,13 @@ class Command(BaseCommand):
         ).select_related("template", "user").order_by("scheduled_for")[:100]
 
         for event in events:
-            try:
-                with transaction.atomic():
-                    process_notification_event(event)
-                    processed += 1
-            except Exception as exc:
-                event.status = NotificationEvent.Status.FAILED
-                event.last_error = str(exc)[:255]
-                event.provider_response = {"error": str(exc)}
-                event.save(update_fields=["status", "last_error", "provider_response", "updated_at"])
+            with transaction.atomic():
+                event.refresh_from_db()
+                if event.status != NotificationEvent.Status.PENDING:
+                    continue
+                response = process_notification_event(event)
+            if response and response.get("status") == "failed":
                 failed += 1
+            else:
+                processed += 1
         self.stdout.write(self.style.SUCCESS(f"Processed {processed} notifications; {failed} failed."))

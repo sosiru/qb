@@ -1,10 +1,5 @@
-from django.db import models
+from django.db import migrations, models
 
-NOTIFICATION_CHANNEL_CHOICES = [
-    ("SMS", "SMS"),
-    ("EMAIL", "Email"),
-    ("IN_APP", "In App"),
-]
 
 NOTIFICATION_EVENT_TYPE_CHOICES = [
     ("T_MINUS_3", "T Minus 3"),
@@ -23,13 +18,23 @@ NOTIFICATION_EVENT_TYPE_CHOICES = [
     ("WALLET_WITHDRAWAL_REQUESTED", "Wallet Withdrawal Requested"),
     ("WALLET_LOW", "Wallet Low"),
     ("OVERDUE_PAYMENT", "Overdue Payment"),
-    ("PRODUCT_UPDATE", "Product Update"),
 ]
 
 
-class TimestampedModel(models.Model):
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+class Migration(migrations.Migration):
+    dependencies = [
+        ("notifications", "0001_initial"),
+    ]
 
-    class Meta:
-        abstract = True
+    operations = [
+        migrations.AlterField(
+            model_name="notificationevent",
+            name="event_type",
+            field=models.CharField(choices=NOTIFICATION_EVENT_TYPE_CHOICES, max_length=32),
+        ),
+        migrations.AlterField(
+            model_name="notificationtemplate",
+            name="event_type",
+            field=models.CharField(choices=NOTIFICATION_EVENT_TYPE_CHOICES, max_length=32),
+        ),
+    ]

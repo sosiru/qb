@@ -37,6 +37,7 @@ class NotificationEvent(TimestampedModel):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     scheduled_for = models.DateTimeField()
     sent_at = models.DateTimeField(null=True, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
     unique_identifier = models.CharField(max_length=120, db_index=True, blank=True, default="")
     recipients = models.JSONField(default=list, blank=True)
     context = models.JSONField(default=dict, blank=True)

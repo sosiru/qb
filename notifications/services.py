@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import timedelta
 from urllib import error, request
@@ -14,6 +15,8 @@ from base.models import PaymentSchedule
 from ledger.models import Account
 
 from .models import NotificationEvent, NotificationTemplate
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationDispatchError(Exception):
@@ -35,6 +38,8 @@ def _recipients_for_channel(user, channel):
         return [str(user.phone_number)]
     if channel == "EMAIL" and user and user.email_notifications_enabled and user.email:
         return [str(user.email)]
+    if channel == "IN_APP" and user:
+        return [str(user.id)]
     return []
 
 
@@ -53,11 +58,18 @@ def _local_day_bounds(value):
 @transaction.atomic
 def queue_notifications_for_user(user, event_type, context=None, scheduled_for=None):
     scheduled_for = scheduled_for or timezone.now()
-    if event_type == "LOGIN_SUCCESS" and user:
+    dedupe_daily_event_types = {
+        "LOGIN_SUCCESS",
+        "T_MINUS_3",
+        "DUE_TODAY",
+        "WALLET_LOW",
+        "OVERDUE_PAYMENT",
+    }
+    if event_type in dedupe_daily_event_types and user:
         day_start, day_end = _local_day_bounds(scheduled_for)
         already_queued_today = NotificationEvent.objects.filter(
             user=user,
-            event_type="LOGIN_SUCCESS",
+            event_type=event_type,
             scheduled_for__gte=day_start,
             scheduled_for__lt=day_end,
         ).exists()
@@ -75,8 +87,9 @@ def queue_notifications_for_user(user, event_type, context=None, scheduled_for=N
             template=template,
             channel=template.channel,
             event_type=event_type,
-            status=NotificationEvent.Status.PENDING,
+            status=NotificationEvent.Status.SENT if template.channel == "IN_APP" else NotificationEvent.Status.PENDING,
             scheduled_for=scheduled_for,
+            sent_at=scheduled_for if template.channel == "IN_APP" else None,
             unique_identifier=str(uuid.uuid4()),
             recipients=recipients,
             context=_merge_context(template, context),
@@ -109,7 +122,7 @@ def queue_email_notification(recipients, event_type, context=None, scheduled_for
 def build_notification_payload(event):
     return {
         "unique_identifier": event.unique_identifier,
-        "system": event.template.system or settings.NOTIFY_SYSTEM,
+        "system": settings.NOTIFY_SYSTEM or event.template.system or "qb",
         "recipients": event.recipients,
         "notification_type": event.channel.lower(),
         "template": event.template.provider_template,
@@ -173,6 +186,53 @@ def _event_view_model(event):
             ("Role", context.get("role", "")),
             ("Invite email", context.get("email", "")),
         ]
+    elif event.event_type == "WALLET_TOPUP_REQUESTED":
+        title = "Wallet top-up started"
+        intro = "Your wallet top-up request has been received and is being processed."
+        badge = "Top-Up Started"
+        details = [
+            ("Wallet", context.get("wallet_type", "")),
+            ("Amount", _money_minor(context.get("amount_minor"))),
+            ("Phone", context.get("phone_number", "")),
+        ]
+    elif event.event_type == "WALLET_TOPUP_COMPLETED":
+        title = "Wallet top-up completed"
+        intro = "Funds have been added to your wallet and are available for payments."
+        badge = "Wallet Funded"
+        details = [
+            ("Wallet", context.get("wallet_type", "")),
+            ("Amount", _money_minor(context.get("amount_minor"))),
+            ("Available balance", _money_minor(context.get("wallet_balance_minor"))),
+        ]
+    elif event.event_type == "WALLET_WITHDRAWAL_REQUESTED":
+        title = "Wallet withdrawal requested"
+        intro = "Your wallet withdrawal request has been recorded for processing."
+        badge = "Withdrawal"
+        details = [
+            ("Amount", _money_minor(context.get("amount_minor"))),
+            ("Phone", context.get("phone_number", "")),
+            ("Available balance", _money_minor(context.get("wallet_balance_minor"))),
+        ]
+    elif event.event_type == "WALLET_LOW":
+        title = "Wallet balance is low"
+        intro = "Your wallet may not have enough funds for upcoming payments. Top up before the due date."
+        badge = "Low Wallet"
+        details = [
+            ("Available balance", _money_minor(context.get("wallet_balance_minor"))),
+            ("Upcoming payments", _money_minor(context.get("total_amount_minor"))),
+            ("Shortfall", _money_minor(context.get("shortfall_minor"))),
+            ("Schedules", context.get("schedule_count", "")),
+        ]
+    elif event.event_type == "OVERDUE_PAYMENT":
+        title = "Payment is overdue"
+        intro = "One or more scheduled payments are overdue. Review them and pay as soon as possible."
+        badge = "Overdue"
+        details = [
+            ("Overdue payments", context.get("schedule_count", "")),
+            ("Total amount", _money_minor(context.get("total_amount_minor"))),
+            ("Oldest due date", context.get("oldest_due_date", "")),
+            ("Days overdue", context.get("oldest_overdue_days", "")),
+        ]
     elif event.event_type in {"T_MINUS_3", "DUE_TODAY"}:
         due_copy = "due in 3 days" if event.event_type == "T_MINUS_3" else "due today"
         title = f"Scheduled payments {due_copy}"
@@ -226,6 +286,11 @@ def _event_view_model(event):
             ("Batch ID", context.get("batch_id", "")),
             ("Reason", context.get("reason", "")),
         ]
+    elif event.event_type == "PRODUCT_UPDATE":
+        title = context.get("title") or "Quick Bundl update"
+        intro = context.get("intro") or context.get("body") or "A new Quick Bundl update is available."
+        badge = context.get("badge") or "Product Update"
+        cta_label = context.get("cta_label") or "View update"
 
     extra_details = context.get("details") or []
     if isinstance(extra_details, list):
@@ -270,7 +335,52 @@ def send_email_event(event):
     return {"status": "sent", "sent_count": sent_count, "recipients": event.recipients}
 
 
+def send_sms_failure_backup_email(event, failure):
+    if event.channel != "SMS" or not event.user_id or not event.user.email:
+        return {"status": "skipped", "reason": "email recipient unavailable"}
+
+    template = NotificationTemplate.objects.filter(event_type=event.event_type, channel="EMAIL", active=True).first()
+    if not template:
+        return {"status": "skipped", "reason": "email template unavailable"}
+
+    backup_event = (
+        NotificationEvent.objects.filter(
+            user=event.user,
+            channel="EMAIL",
+            event_type=event.event_type,
+            scheduled_for=event.scheduled_for,
+            context=event.context,
+        )
+        .exclude(id=event.id)
+        .order_by("created_at")
+        .first()
+    )
+    if backup_event and backup_event.status == NotificationEvent.Status.SENT:
+        return {"status": "already_sent", "event_id": str(backup_event.id)}
+    if not backup_event:
+        backup_event = NotificationEvent.objects.create(
+            user=event.user,
+            template=template,
+            channel="EMAIL",
+            event_type=event.event_type,
+            status=NotificationEvent.Status.PENDING,
+            scheduled_for=timezone.now(),
+            unique_identifier=str(uuid.uuid4()),
+            recipients=[str(event.user.email)],
+            context=_merge_context(template, event.context),
+            provider_response={
+                "backup_for_event_id": str(event.id),
+                "backup_reason": str(failure),
+            },
+        )
+    response = process_notification_event(backup_event)
+    return {"status": "sent" if response.get("status") != "failed" else "failed", "event_id": str(backup_event.id), "response": response}
+
+
 def send_notification_event(event):
+    if event.channel == "IN_APP":
+        return {"status": "delivered_in_app"}
+
     if event.channel == "EMAIL":
         return send_email_event(event)
 
@@ -296,10 +406,27 @@ def send_notification_event(event):
 
 
 def process_notification_event(event):
+    if event.status == NotificationEvent.Status.SENT:
+        return {"status": "skipped", "reason": "already sent"}
     event.status = NotificationEvent.Status.PROCESSING
     event.attempts += 1
     event.save(update_fields=["status", "attempts", "updated_at"])
-    response = send_notification_event(event)
+    try:
+        response = send_notification_event(event)
+    except Exception as exc:
+        backup_response = send_sms_failure_backup_email(event, exc)
+        event.status = NotificationEvent.Status.FAILED
+        event.last_error = str(exc)[:255]
+        event.provider_response = {"error": str(exc), "email_backup": backup_response}
+        event.save(update_fields=["status", "last_error", "provider_response", "updated_at"])
+        logger.warning(
+            "notification.dispatch_failed event_id=%s channel=%s event_type=%s error=%s",
+            event.id,
+            event.channel,
+            event.event_type,
+            exc,
+        )
+        return {"status": "failed", "error": str(exc)}
     event.status = NotificationEvent.Status.SENT
     event.sent_at = timezone.now()
     event.provider_response = response or {}
@@ -308,10 +435,140 @@ def process_notification_event(event):
     return response
 
 
+def ensure_product_update_template():
+    template, _ = NotificationTemplate.objects.get_or_create(
+        code="in_app_product_update",
+        defaults={
+            "event_type": "PRODUCT_UPDATE",
+            "channel": "IN_APP",
+            "system": "qb",
+            "provider_template": "in_app_product_update",
+            "subject_template": "",
+            "description": "In-app announcement for major Quick Bundl updates.",
+            "default_context": {"badge": "Product Update"},
+            "active": True,
+        },
+    )
+    changed = False
+    if template.event_type != "PRODUCT_UPDATE":
+        template.event_type = "PRODUCT_UPDATE"
+        changed = True
+    if template.channel != "IN_APP":
+        template.channel = "IN_APP"
+        changed = True
+    if not template.active:
+        template.active = True
+        changed = True
+    if changed:
+        template.save(update_fields=["event_type", "channel", "active", "updated_at"])
+    return template
+
+
+def queue_product_update_notifications(title, body, users=None, context=None):
+    template = ensure_product_update_template()
+    base_context = {
+        "title": title,
+        "intro": body,
+        "body": body,
+        "badge": "Major Update",
+    }
+    base_context.update(context or {})
+    if users is None:
+        from eusers.models import User
+
+        users = User.objects.filter(is_active=True)
+    created = []
+    now = timezone.now()
+    for user in users:
+        event = NotificationEvent.objects.create(
+            user=user,
+            template=template,
+            channel="IN_APP",
+            event_type="PRODUCT_UPDATE",
+            status=NotificationEvent.Status.SENT,
+            scheduled_for=now,
+            sent_at=now,
+            unique_identifier=str(uuid.uuid4()),
+            recipients=[str(user.id)],
+            context=_merge_context(template, base_context),
+        )
+        created.append(event)
+    return created
+
+
+def serialize_in_app_notification(event):
+    context = event.context or {}
+    view_model = _event_view_model(event)
+    return {
+        "id": str(event.id),
+        "event_type": event.event_type,
+        "title": context.get("title") or view_model["title"],
+        "body": context.get("body") or context.get("intro") or view_model["intro"],
+        "badge": context.get("badge") or view_model["badge"],
+        "severity": context.get("severity") or "info",
+        "cta_label": context.get("cta_label") or view_model["cta_label"],
+        "cta_url": context.get("cta_url") or view_model["cta_url"],
+        "read_at": event.read_at.isoformat() if event.read_at else None,
+        "created_at": event.created_at.isoformat(),
+        "sent_at": event.sent_at.isoformat() if event.sent_at else None,
+    }
+
+
+def _wallet_user_recipients(wallet):
+    if wallet.user_id:
+        return [wallet.user]
+    if not wallet.organization_id:
+        return []
+
+    from base.models import OrganizationMembership
+
+    memberships = (
+        OrganizationMembership.objects.filter(
+            organization=wallet.organization,
+            is_active=True,
+            role__in=[OrganizationMembership.Role.ADMIN, OrganizationMembership.Role.CHECKER],
+        )
+        .select_related("user")
+        .order_by("created_at")
+    )
+    return [membership.user for membership in memberships]
+
+
+def queue_wallet_owner_notifications(wallet, event_type, context=None, scheduled_for=None):
+    context = context or {}
+    base_context = {
+        "wallet_id": str(wallet.id),
+        "wallet_type": wallet.wallet_type,
+        "wallet_balance_minor": wallet.available_balance_minor,
+        "organization_id": str(wallet.organization_id) if wallet.organization_id else "",
+        "organization_name": wallet.organization.name if wallet.organization_id else "",
+    }
+    base_context.update(context)
+    created = []
+    for user in _wallet_user_recipients(wallet):
+        created.extend(queue_notifications_for_user(user, event_type, base_context, scheduled_for=scheduled_for))
+    return created
+
+
+def queue_wallet_topup_completed_notification(transaction_record):
+    wallet = transaction_record.account
+    wallet.refresh_from_db()
+    return queue_wallet_owner_notifications(
+        wallet,
+        "WALLET_TOPUP_COMPLETED",
+        {
+            "amount_minor": transaction_record.amount_minor,
+            "transaction_id": str(transaction_record.id),
+            "reference": transaction_record.internal_reference,
+        },
+        scheduled_for=timezone.now(),
+    )
+
+
 def create_due_notifications(run_date=None):
     run_date = run_date or timezone.localdate()
-    reminder_day = max(run_date.day + 3, 1)
-    schedules = PaymentSchedule.objects.filter(day_of_month=reminder_day, active=True, payee__active=True).select_related("payee__user")
+    reminder_date = run_date + timedelta(days=3)
+    schedules = PaymentSchedule.objects.filter(next_due_date=reminder_date, active=True, payee__active=True).select_related("payee__user")
     created = 0
     user_rollups = {}
     for schedule in schedules:
@@ -335,7 +592,7 @@ def create_due_notifications(run_date=None):
                 "total_amount_minor": rollup["total_amount_minor"],
                 "schedule_count": rollup["schedule_count"],
                 "due_in_days": 3,
-                "due_day": reminder_day,
+                "due_date": reminder_date.isoformat(),
             },
             scheduled_for=timezone.now(),
         )
@@ -345,7 +602,7 @@ def create_due_notifications(run_date=None):
 
 def create_due_today_notifications(run_date=None):
     run_date = run_date or timezone.localdate()
-    schedules = PaymentSchedule.objects.filter(day_of_month=run_date.day, active=True, payee__active=True).select_related("payee__user")
+    schedules = PaymentSchedule.objects.filter(next_due_date=run_date, active=True, payee__active=True).select_related("payee__user")
     created = 0
     user_rollups = {}
     for schedule in schedules:
@@ -378,3 +635,96 @@ def create_due_today_notifications(run_date=None):
         )
         created += len(events)
     return created
+
+
+def create_low_wallet_notifications(run_date=None):
+    run_date = run_date or timezone.localdate()
+    reminder_until = run_date + timedelta(days=3)
+    schedules = PaymentSchedule.objects.filter(
+        next_due_date__lte=reminder_until,
+        active=True,
+        payee__active=True,
+        payee__user__default_payment_mode="WALLET",
+    ).select_related("payee__user")
+    created = 0
+    user_rollups = {}
+    for schedule in schedules:
+        user = schedule.payee.user
+        if not user:
+            continue
+        if user.id not in user_rollups:
+            wallet = Account.objects.filter(user=user, account_kind=Account.AccountKind.PRIMARY).first()
+            user_rollups[user.id] = {
+                "user": user,
+                "wallet_balance_minor": wallet.available_balance_minor if wallet else 0,
+                "total_amount_minor": 0,
+                "schedule_count": 0,
+            }
+        user_rollups[user.id]["total_amount_minor"] += schedule.amount_minor
+        user_rollups[user.id]["schedule_count"] += 1
+
+    for rollup in user_rollups.values():
+        shortfall_minor = rollup["total_amount_minor"] - rollup["wallet_balance_minor"]
+        if shortfall_minor <= 0:
+            continue
+        events = queue_notifications_for_user(
+            rollup["user"],
+            "WALLET_LOW",
+            {
+                "wallet_balance_minor": rollup["wallet_balance_minor"],
+                "total_amount_minor": rollup["total_amount_minor"],
+                "shortfall_minor": shortfall_minor,
+                "schedule_count": rollup["schedule_count"],
+                "reminder_until": reminder_until.isoformat(),
+            },
+            scheduled_for=timezone.now(),
+        )
+        created += len(events)
+    return created
+
+
+def create_overdue_payment_notifications(run_date=None):
+    run_date = run_date or timezone.localdate()
+    schedules = PaymentSchedule.objects.filter(next_due_date__lt=run_date, active=True, payee__active=True).select_related("payee__user")
+    created = 0
+    user_rollups = {}
+    for schedule in schedules:
+        user = schedule.payee.user
+        if not user:
+            continue
+        if user.id not in user_rollups:
+            user_rollups[user.id] = {
+                "user": user,
+                "total_amount_minor": 0,
+                "schedule_count": 0,
+                "oldest_due_date": schedule.next_due_date,
+            }
+        user_rollups[user.id]["total_amount_minor"] += schedule.amount_minor
+        user_rollups[user.id]["schedule_count"] += 1
+        if schedule.next_due_date < user_rollups[user.id]["oldest_due_date"]:
+            user_rollups[user.id]["oldest_due_date"] = schedule.next_due_date
+
+    for rollup in user_rollups.values():
+        oldest_due_date = rollup["oldest_due_date"]
+        events = queue_notifications_for_user(
+            rollup["user"],
+            "OVERDUE_PAYMENT",
+            {
+                "total_amount_minor": rollup["total_amount_minor"],
+                "schedule_count": rollup["schedule_count"],
+                "oldest_due_date": oldest_due_date.isoformat(),
+                "oldest_overdue_days": (run_date - oldest_due_date).days,
+            },
+            scheduled_for=timezone.now(),
+        )
+        created += len(events)
+    return created
+
+
+def create_all_reminder_notifications(run_date=None):
+    return {
+        "t_minus_3": create_due_notifications(run_date),
+        "due_today": create_due_today_notifications(run_date),
+        "low_wallet": create_low_wallet_notifications(run_date),
+        "overdue": create_overdue_payment_notifications(run_date),
+    }

@@ -236,5 +236,311 @@
       "created_at": "2026-07-03T00:00:00Z",
       "updated_at": "2026-07-03T00:00:00Z"
     }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f15",
+    "fields": {
+      "code": "sms_self_onboarding",
+      "event_type": "SELF_ONBOARDING",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_self_onboarding",
+      "subject_template": "",
+      "description": "SMS sent after successful account registration.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f16",
+    "fields": {
+      "code": "email_self_onboarding",
+      "event_type": "SELF_ONBOARDING",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_self_onboarding",
+      "subject_template": "Welcome to Quick Bundl",
+      "description": "Email sent after successful account registration.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f17",
+    "fields": {
+      "code": "sms_login_otp",
+      "event_type": "LOGIN_OTP",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_otp",
+      "subject_template": "",
+      "description": "SMS sent with the login OTP code.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f18",
+    "fields": {
+      "code": "email_login_otp",
+      "event_type": "LOGIN_OTP",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_login_otp",
+      "subject_template": "Your Quick Bundl login code",
+      "description": "Email sent with the login OTP code.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f19",
+    "fields": {
+      "code": "sms_login_success",
+      "event_type": "LOGIN_SUCCESS",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_login_success",
+      "subject_template": "",
+      "description": "SMS sent after successful login.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f20",
+    "fields": {
+      "code": "email_login_success",
+      "event_type": "LOGIN_SUCCESS",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_login_success",
+      "subject_template": "New Quick Bundl login",
+      "description": "Email sent after successful login.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f21",
+    "fields": {
+      "code": "sms_organization_invite",
+      "event_type": "ORGANIZATION_INVITE",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_organization_invite",
+      "subject_template": "",
+      "description": "SMS sent for organization invitations.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f22",
+    "fields": {
+      "code": "email_organization_invite",
+      "event_type": "ORGANIZATION_INVITE",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_organization_invite",
+      "subject_template": "You're invited to {{ organization_name }}",
+      "description": "Email sent for organization invitations.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f23",
+    "fields": {
+      "code": "sms_wallet_topup_requested",
+      "event_type": "WALLET_TOPUP_REQUESTED",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_wallet_topup_requested",
+      "subject_template": "",
+      "description": "SMS sent when a wallet top-up is initiated.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f24",
+    "fields": {
+      "code": "email_wallet_topup_requested",
+      "event_type": "WALLET_TOPUP_REQUESTED",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_wallet_topup_requested",
+      "subject_template": "Wallet top-up started",
+      "description": "Email sent when a wallet top-up is initiated.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f25",
+    "fields": {
+      "code": "sms_wallet_topup_completed",
+      "event_type": "WALLET_TOPUP_COMPLETED",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_wallet_topup_completed",
+      "subject_template": "",
+      "description": "SMS sent when a wallet top-up completes.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f26",
+    "fields": {
+      "code": "email_wallet_topup_completed",
+      "event_type": "WALLET_TOPUP_COMPLETED",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_wallet_topup_completed",
+      "subject_template": "Wallet top-up completed",
+      "description": "Email sent when a wallet top-up completes.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f27",
+    "fields": {
+      "code": "sms_wallet_withdrawal_requested",
+      "event_type": "WALLET_WITHDRAWAL_REQUESTED",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_wallet_withdrawal_requested",
+      "subject_template": "",
+      "description": "SMS sent when a wallet withdrawal is requested.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f28",
+    "fields": {
+      "code": "email_wallet_withdrawal_requested",
+      "event_type": "WALLET_WITHDRAWAL_REQUESTED",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_wallet_withdrawal_requested",
+      "subject_template": "Wallet withdrawal requested",
+      "description": "Email sent when a wallet withdrawal is requested.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f29",
+    "fields": {
+      "code": "sms_wallet_low",
+      "event_type": "WALLET_LOW",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_wallet_low",
+      "subject_template": "",
+      "description": "SMS sent when wallet balance may not cover due payments.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f30",
+    "fields": {
+      "code": "email_wallet_low",
+      "event_type": "WALLET_LOW",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_wallet_low",
+      "subject_template": "Wallet balance is low",
+      "description": "Email sent when wallet balance may not cover due payments.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f31",
+    "fields": {
+      "code": "sms_overdue_payment",
+      "event_type": "OVERDUE_PAYMENT",
+      "channel": "SMS",
+      "system": "qb",
+      "provider_template": "sms_overdue_payment",
+      "subject_template": "",
+      "description": "SMS sent for overdue scheduled payments.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
+  },
+  {
+    "model": "notifications.notificationtemplate",
+    "pk": "4ed97131-f7f6-4da8-ac47-40cb87755f32",
+    "fields": {
+      "code": "email_overdue_payment",
+      "event_type": "OVERDUE_PAYMENT",
+      "channel": "EMAIL",
+      "system": "qb",
+      "provider_template": "email_overdue_payment",
+      "subject_template": "Scheduled payment overdue",
+      "description": "Email sent for overdue scheduled payments.",
+      "default_context": {},
+      "active": true,
+      "created_at": "2026-07-03T00:00:00Z",
+      "updated_at": "2026-07-03T00:00:00Z"
+    }
   }
 ]
