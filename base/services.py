@@ -54,7 +54,6 @@ from .utils import TransactionRefGenerator
 SERVICE_FEE_BPS = 200
 logger = logging.getLogger(__name__)
 DEFAULT_TEST_OTP_PHONE = "254710956633"
-DEFAULT_TEST_OTP_CODE = "123456"
 LOGIN_OTP_TTL_MINUTES = 10
 LOGIN_OTP_RETRY_AFTER_SECONDS = 60
 TRANSACTION_REF_GENERATOR = TransactionRefGenerator(prefix="RT")
@@ -476,14 +475,7 @@ def issue_token(user):
 
 
 def _generate_login_otp(phone_number):
-    if phone_number == DEFAULT_TEST_OTP_PHONE:
-        return DEFAULT_TEST_OTP_CODE
     return f"{random.SystemRandom().randint(0, 99999):05d}"
-
-
-def _is_default_test_otp(phone_number, code):
-    normalized_code = str(code or "").strip()
-    return phone_number == DEFAULT_TEST_OTP_PHONE and normalized_code.isdigit() and len(normalized_code) == 6
 
 
 def _create_login_otp(user):
@@ -507,9 +499,6 @@ def _create_login_otp(user):
 
 def _verify_login_otp(user, code):
     normalized_code = str(code or "").strip()
-    if _is_default_test_otp(user.phone_number, normalized_code):
-        logger.info("auth.otp.verify.default_test_override user_id=%s phone=%s", user.id, user.phone_number)
-        return
     otp = (
         LoginOtp.objects.filter(
             user=user,
@@ -692,7 +681,7 @@ def login_user(payload):
         raise OtpRequired(
             "OTP required. Enter the code sent to your phone.",
             phone_number=user.phone_number,
-            dev_otp=dev_otp if settings.DEBUG or user.phone_number == DEFAULT_TEST_OTP_PHONE else None,
+            dev_otp=dev_otp if settings.DEBUG else None,
             expires_in_seconds=LOGIN_OTP_TTL_MINUTES * 60,
             retry_after_seconds=LOGIN_OTP_RETRY_AFTER_SECONDS,
         )
