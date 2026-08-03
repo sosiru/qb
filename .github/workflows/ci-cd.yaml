@@ -87,7 +87,6 @@ jobs:
         id: prepare_secrets
         run: |
           declare -A secrets=(
-            [POSTGRES_PASSWORD]="${{ secrets.POSTGRES_PASSWORD }}"
             [DJANGO_SECRET_KEY]="${{ secrets.DJANGO_SECRET_KEY }}"
             [PAYMENT_MICROSERVICE_URL]="${{ secrets.PAYMENT_MICROSERVICE_URL }}"
             [PAYMENT_MICROSERVICE_API_KEY]="${{ secrets.PAYMENT_MICROSERVICE_API_KEY }}"

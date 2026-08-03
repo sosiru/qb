@@ -125,18 +125,17 @@ class RatibaPlatformTests(TestCase):
         )
         self.assertEqual(response.status_code, 201)
 
-        response = self._post(
-            "/api/v1/auth/login/",
-            {
-                "phone_number": "0710956633",
-                "password": "StrongPass123!",
-            },
-        )
+        with patch("base.services._generate_login_otp", return_value="54321"):
+            response = self._post(
+                "/api/v1/auth/login/",
+                {
+                    "phone_number": "0710956633",
+                    "password": "StrongPass123!",
+                },
+            )
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.json()["otp_required"])
         self.assertEqual(response.json()["phone_number"], "254710956633")
-        dev_otp = response.json()["dev_otp"]
-        self.assertRegex(dev_otp, r"^\d{5}$")
 
         response = self._post(
             "/api/v1/auth/login/",
@@ -153,7 +152,7 @@ class RatibaPlatformTests(TestCase):
             {
                 "phone_number": "254710956633",
                 "password": "StrongPass123!",
-                "otp": dev_otp,
+                "otp": "54321",
             },
         )
         self.assertEqual(response.status_code, 200)
