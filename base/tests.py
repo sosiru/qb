@@ -12,7 +12,7 @@ from django.utils import timezone
 from audit.models import AuditLog
 from eusers.models import AccessToken, User
 from notifications.models import NotificationEvent
-from notifications.services import create_all_reminder_notifications, queue_notifications_for_user
+from notifications.services import NotificationInterface, create_all_reminder_notifications, queue_notifications_for_user
 from reports.models import ReportExport
 from ledger.models import Account
 from ledger.services import PaymentService, get_or_create_user_account, initiate_payout, unique_transaction_reference
@@ -1204,6 +1204,71 @@ class RatibaPlatformTests(TestCase):
         self.assertTrue(all(set(payload["body"]["context"]) == {"message"} for payload in sent_payloads))
         self.assertTrue(all(payload["headers"].get("X-api-key") == "notify-key" for payload in sent_payloads))
         self.assertEqual(len(mail.outbox), 0)
+
+    @override_settings(
+        NOTIFY_SMS_TEMPLATE="sms_default",
+        NOTIFY_EMAIL_TEMPLATE="email_default",
+    )
+    def test_notification_interface_sends_exact_notify_contract(self):
+        sent_requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"status":"queued"}'
+
+        def fake_urlopen(req, timeout):
+            sent_requests.append(
+                {
+                    "body": json.loads(req.data.decode("utf-8")),
+                    "headers": dict(req.header_items()),
+                }
+            )
+            return FakeResponse()
+
+        interface = NotificationInterface(
+            base_url="https://notify.example/api/send",
+            api_key="notify-key",
+        )
+        with patch("notifications.services.request.urlopen", side_effect=fake_urlopen):
+            interface.send_sms(
+                "Your SMS message",
+                ["254700000099"],
+                unique_identifier="sms-reference",
+            )
+            interface.send_email(
+                "Your email message",
+                ["notify@example.com"],
+                unique_identifier="email-reference",
+            )
+
+        self.assertEqual(
+            [request_data["body"] for request_data in sent_requests],
+            [
+                {
+                    "notification_type": "sms",
+                    "template": "sms_default",
+                    "unique_identifier": "sms-reference",
+                    "recipients": ["254700000099"],
+                    "context": {"message": "Your SMS message"},
+                },
+                {
+                    "notification_type": "email",
+                    "template": "email_default",
+                    "unique_identifier": "email-reference",
+                    "recipients": ["notify@example.com"],
+                    "context": {"message": "Your email message"},
+                },
+            ],
+        )
+        self.assertTrue(
+            all(request_data["headers"].get("X-api-key") == "notify-key" for request_data in sent_requests)
+        )
 
     @override_settings(
         NOTIFY_URL="https://notify.example/api/send",
