@@ -29,6 +29,8 @@ x-django-env: &django-env
   NOTIFY_SYSTEM: ${NOTIFY_SYSTEM:-ratiba}
   NOTIFY_TIMEOUT_SECONDS: ${NOTIFY_TIMEOUT_SECONDS:-30}
   NOTIFY_LOW_WALLET_THRESHOLD_MINOR: ${NOTIFY_LOW_WALLET_THRESHOLD_MINOR:-0}
+  NOTIFY_SMS_TEMPLATE: ${NOTIFY_SMS_TEMPLATE:-sms_default}
+  NOTIFY_EMAIL_TEMPLATE: ${NOTIFY_EMAIL_TEMPLATE:-email_default}
 
 x-django-full-env: &django-full-env
   <<: [*django-env, *postgres-env]

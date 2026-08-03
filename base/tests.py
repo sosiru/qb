@@ -1177,14 +1177,16 @@ class RatibaPlatformTests(TestCase):
         with patch("notifications.services.request.urlopen", side_effect=fake_urlopen):
             call_command("process_notifications")
 
-        self.assertEqual(len(sent_payloads), 1)
+        self.assertEqual(len(sent_payloads), 2)
         self.assertEqual(NotificationEvent.objects.filter(status=NotificationEvent.Status.SENT).count(), 2)
-        self.assertEqual({payload["body"]["notification_type"] for payload in sent_payloads}, {"sms"})
-        self.assertEqual({payload["body"]["system"] for payload in sent_payloads}, {"radicrunch"})
-        self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(mail.outbox[0].to, ["notify@example.com"])
-        self.assertIn("Payment completed", mail.outbox[0].subject)
-        self.assertTrue(mail.outbox[0].alternatives)
+        self.assertEqual({payload["body"]["notification_type"] for payload in sent_payloads}, {"sms", "email"})
+        self.assertEqual({payload["body"]["template"] for payload in sent_payloads}, {"sms_default", "email_default"})
+        self.assertTrue(all(set(payload["body"]) == {
+            "notification_type", "template", "unique_identifier", "recipients", "context"
+        } for payload in sent_payloads))
+        self.assertTrue(all(set(payload["body"]["context"]) == {"message"} for payload in sent_payloads))
+        self.assertTrue(all(payload["headers"].get("X-api-key") == "notify-key" for payload in sent_payloads))
+        self.assertEqual(len(mail.outbox), 0)
 
     @override_settings(
         NOTIFY_URL="https://notify.example/api/send",

@@ -120,13 +120,23 @@ def queue_email_notification(recipients, event_type, context=None, scheduled_for
 
 
 def build_notification_payload(event):
+    view_model = _event_view_model(event)
+    message = (
+        (event.context or {}).get("message")
+        or (event.context or {}).get("body")
+        or view_model["intro"]
+    )
+    template = (
+        settings.NOTIFY_EMAIL_TEMPLATE
+        if event.channel == "EMAIL"
+        else settings.NOTIFY_SMS_TEMPLATE
+    )
     return {
-        "unique_identifier": event.unique_identifier,
-        "system": settings.NOTIFY_SYSTEM or event.template.system or "ratiba",
-        "recipients": event.recipients,
         "notification_type": event.channel.lower(),
-        "template": event.template.provider_template,
-        "context": event.context,
+        "template": template,
+        "unique_identifier": event.unique_identifier,
+        "recipients": event.recipients,
+        "context": {"message": str(message)},
     }
 
 
@@ -373,18 +383,35 @@ def send_sms_failure_backup_email(event, failure):
                 "backup_reason": str(failure),
             },
         )
-    response = process_notification_event(backup_event)
-    return {"status": "sent" if response.get("status") != "failed" else "failed", "event_id": str(backup_event.id), "response": response}
+    backup_event.status = NotificationEvent.Status.PROCESSING
+    backup_event.attempts += 1
+    backup_event.save(update_fields=["status", "attempts", "updated_at"])
+    try:
+        response = send_email_event(backup_event)
+    except Exception as exc:
+        backup_event.status = NotificationEvent.Status.FAILED
+        backup_event.last_error = str(exc)[:255]
+        backup_event.provider_response = {"error": str(exc), "transport": "smtp_backup"}
+        backup_event.save(update_fields=["status", "last_error", "provider_response", "updated_at"])
+        return {"status": "failed", "event_id": str(backup_event.id), "error": str(exc)}
+
+    backup_event.status = NotificationEvent.Status.SENT
+    backup_event.sent_at = timezone.now()
+    backup_event.last_error = ""
+    backup_event.provider_response = {**(response or {}), "transport": "smtp_backup"}
+    backup_event.save(
+        update_fields=["status", "sent_at", "last_error", "provider_response", "updated_at"]
+    )
+    return {"status": "sent", "event_id": str(backup_event.id), "response": response}
 
 
 def send_notification_event(event):
     if event.channel == "IN_APP":
         return {"status": "delivered_in_app"}
 
-    if event.channel == "EMAIL":
-        return send_email_event(event)
-
     if not notifications_dispatch_enabled():
+        if event.channel == "EMAIL":
+            return send_email_event(event)
         raise NotificationDispatchError("Notification provider is not configured.")
 
     payload = build_notification_payload(event)
