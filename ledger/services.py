@@ -572,7 +572,7 @@ class PaymentInterface:
                 originator_ref=originator_ref,
             )
             callback_url = getattr(settings, "PAYMENT_CALLBACK_URL", "").strip()
-            if callback_url:
+            if callback_url and not self._is_pesaway_core():
                 provider_payload["callback_url"] = callback_url
         stored_payload = {
             "originator_ref": originator_ref,

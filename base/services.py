@@ -2585,18 +2585,47 @@ def list_batches(user, organization_id=None, filters=None):
     return queryset
 
 
-def quick_pay(user, payload):
-    payee_id = payload.get("payee_id")
-    amount_minor = int(payload.get("amount_minor") or 0)
-    if not payee_id or amount_minor <= 0:
-        raise ValidationError("payee_id and amount_minor are required.")
+def _quick_pay_recipient_rows(payload):
+    common_amount_minor = int(payload.get("amount_minor") or 0)
+    rows = []
+    recipients = payload.get("recipients")
+    if isinstance(recipients, list):
+        for recipient in recipients:
+            if not isinstance(recipient, dict):
+                continue
+            rows.append(
+                {
+                    "payee_id": recipient.get("payee_id") or recipient.get("id"),
+                    "amount_minor": int(recipient.get("amount_minor") or common_amount_minor),
+                    "external_reference": (recipient.get("external_reference") or "").strip(),
+                }
+            )
+    elif isinstance(payload.get("payee_ids"), list):
+        rows = [
+            {
+                "payee_id": payee_id,
+                "amount_minor": common_amount_minor,
+                "external_reference": "",
+            }
+            for payee_id in payload["payee_ids"]
+        ]
+    elif payload.get("payee_id"):
+        rows = [
+            {
+                "payee_id": payload.get("payee_id"),
+                "amount_minor": common_amount_minor,
+                "external_reference": (payload.get("external_reference") or "").strip(),
+            }
+        ]
+    rows = [row for row in rows if row["payee_id"]]
+    if not rows:
+        raise ValidationError("At least one payee is required.")
+    if any(row["amount_minor"] <= 0 for row in rows):
+        raise ValidationError("amount_minor must be greater than 0 for every recipient.")
+    return rows
 
-    payment_mode = payload.get("payment_mode", user.default_payment_mode)
-    if payment_mode not in PaymentBatch.PaymentMode.values:
-        raise ValidationError("Invalid payment_mode.")
 
-    payee = get_object_or_404(Payee, id=payee_id)
-    organization = None
+def _quick_pay_organization(user, payees, payload):
     if payload.get("organization_id"):
         organization = get_organization_for_user(
             user,
@@ -2607,23 +2636,56 @@ def quick_pay(user, payload):
                 OrganizationMembership.Role.CHECKER,
             ],
         )
-        if payee.organization_id and payee.organization_id != organization.id:
-            raise ValidationError("payee_id does not belong to the selected organization.")
-        if payee.user_id:
-            raise ValidationError("Organization quick pay requires an organization payee.")
-    elif payee.organization_id:
+        for payee in payees:
+            if payee.organization_id and payee.organization_id != organization.id:
+                raise ValidationError("Every payee must belong to the selected organization.")
+            if payee.user_id:
+                raise ValidationError("Organization quick pay requires organization payees.")
+        return organization
+
+    organization_payees = [payee for payee in payees if payee.organization_id]
+    user_payees = [payee for payee in payees if payee.user_id]
+    if organization_payees and user_payees:
+        raise ValidationError("Select either organization payees or personal payees, not both.")
+    if organization_payees:
+        organization_ids = {payee.organization_id for payee in organization_payees}
+        if len(organization_ids) != 1:
+            raise ValidationError("Organization quick pay recipients must belong to the same organization.")
+        organization = organization_payees[0].organization
         get_organization_for_user(
             user,
-            payee.organization_id,
+            organization.id,
             allowed_roles=[
                 OrganizationMembership.Role.ADMIN,
                 OrganizationMembership.Role.MAKER,
                 OrganizationMembership.Role.CHECKER,
             ],
         )
-        organization = payee.organization
-    elif payee.user_id != user.id and not can_manage_all_organizations(user):
-        raise PermissionDeniedError("You do not own this payee.")
+        return organization
+
+    for payee in user_payees:
+        if payee.user_id != user.id and not can_manage_all_organizations(user):
+            raise PermissionDeniedError("You do not own this payee.")
+    return None
+
+
+def quick_pay(user, payload):
+    recipient_rows = _quick_pay_recipient_rows(payload)
+
+    payment_mode = payload.get("payment_mode", user.default_payment_mode)
+    if payment_mode not in PaymentBatch.PaymentMode.values:
+        raise ValidationError("Invalid payment_mode.")
+
+    payees = {
+        str(payee.id): payee
+        for payee in Payee.objects.select_related("organization", "user").filter(id__in=[row["payee_id"] for row in recipient_rows])
+    }
+    missing_ids = [str(row["payee_id"]) for row in recipient_rows if str(row["payee_id"]) not in payees]
+    if missing_ids:
+        raise ValidationError("One or more selected payees could not be found.")
+    organization = _quick_pay_organization(user, list(payees.values()), payload)
+    recipient_names = [payees[str(row["payee_id"])].label for row in recipient_rows]
+    default_description = f"Quick pay to {recipient_names[0]}" if len(recipient_names) == 1 else f"Quick pay to {len(recipient_names)} recipients"
 
     batch = PaymentBatch.objects.create(
         batch_kind=PaymentBatch.BatchKind.CORPORATE_UPLOAD if organization else PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
@@ -2634,22 +2696,27 @@ def quick_pay(user, payload):
         user=None if organization else user,
         organization=organization,
         scheduled_for=_parse_date(payload.get("scheduled_for") or timezone.localdate()),
-        description=(payload.get("description") or f"Quick pay to {payee.label}").strip(),
+        description=(payload.get("description") or default_description).strip(),
         submitted_by=user if organization or user.payouts_require_owner_approval else None,
         submitted_at=timezone.now() if not organization and user.payouts_require_owner_approval else None,
-        metadata={"requires_owner_approval": user.payouts_require_owner_approval} if not organization else {},
+        metadata={
+            **({"requires_owner_approval": user.payouts_require_owner_approval} if not organization else {}),
+            "recipient_count": len(recipient_rows),
+        },
     )
-    PaymentInstruction.objects.create(
-        batch=batch,
-        payee=payee,
-        recipient_name=payee.label,
-        recipient_type=payee.payee_type,
-        destination=_build_destination_from_payee(payee),
-        amount_minor=amount_minor,
-        fee_amount_minor=_calculate_instruction_fee(amount_minor),
-        category=payee.expense_category,
-        external_reference=(payload.get("external_reference") or payee.account_reference or "").strip(),
-    )
+    for row in recipient_rows:
+        payee = payees[str(row["payee_id"])]
+        PaymentInstruction.objects.create(
+            batch=batch,
+            payee=payee,
+            recipient_name=payee.label,
+            recipient_type=payee.payee_type,
+            destination=_build_destination_from_payee(payee),
+            amount_minor=row["amount_minor"],
+            fee_amount_minor=_calculate_instruction_fee(row["amount_minor"]),
+            category=payee.expense_category,
+            external_reference=(row["external_reference"] or payload.get("external_reference") or payee.account_reference or "").strip(),
+        )
     batch.recalculate_totals()
     _recalculate_batch_fee(batch)
 
@@ -2666,7 +2733,7 @@ def quick_pay(user, payload):
             target_id=batch.id,
             metadata={
                 "batch_description": batch.description,
-                "payee_label": payee.label,
+                "payee_labels": recipient_names,
                 "instruction_count": batch.instructions.count(),
                 "amount_minor": batch.total_amount_minor,
                 "fee_amount_minor": batch.fee_amount_minor,

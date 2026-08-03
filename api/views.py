@@ -1034,10 +1034,16 @@ def wallet_ledger_view(request):
 def payment_webhook_view(request):
     if request.method != "POST":
         return json_error("Method not allowed.", status=405)
-    webhook_secret = getattr(settings, "PAYMENT_WEBHOOK_SECRET", "")
-    supplied_secret = request.headers.get("X-Webhook-Secret", "")
-    if webhook_secret and not hmac.compare_digest(supplied_secret, webhook_secret):
-        return json_error("Invalid webhook credentials.", status=401)
+    webhook_secret = getattr(settings, "PESAWAY_WEBHOOK_SECRET", "")
+    if webhook_secret:
+        supplied_signature = request.headers.get("X-Webhook-Signature", "").strip()
+        expected_signature = hmac.new(
+            webhook_secret.encode("utf-8"),
+            request.body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            return json_error("Invalid webhook signature.", status=401)
     try:
         payload = get_request_data(request)
         payment_request = PaymentInterface().handle_webhook(payload)

@@ -503,7 +503,7 @@ class RatibaPlatformTests(TestCase):
             },
             token=token,
         ).json()["payee"]["id"]
-        self._post("/api/v1/wallets/topups/", {"amount_minor": 100000}, token=token)
+        self._post("/api/v1/wallets/topups/", {"amount_minor": 100000, "simulate": True}, token=token)
 
         response = self._post(
             "/api/v1/payments/quick-pay/",
@@ -527,6 +527,62 @@ class RatibaPlatformTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["total_fees_minor"], 500)
         self.assertEqual(response.json()["transactions"][0]["gross_amount_minor"], 25500)
+
+    def test_quick_pay_accepts_multiple_selected_payees(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000077",
+                "password": "StrongPass123!",
+                "full_name": "Multi Pay User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        token = response.json()["token"]
+        payee_one_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Water Utility",
+                "payee_type": "PAYBILL",
+                "paybill_number": "777001",
+                "account_reference": "WATER-1",
+                "expense_category": "utilities",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+        payee_two_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Internet Provider",
+                "payee_type": "PAYBILL",
+                "paybill_number": "777002",
+                "account_reference": "NET-1",
+                "expense_category": "internet",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+        self._post("/api/v1/wallets/topups/", {"amount_minor": 200000, "simulate": True}, token=token)
+
+        response = self._post(
+            "/api/v1/payments/quick-pay/",
+            {
+                "recipients": [
+                    {"payee_id": payee_one_id, "amount_minor": 25000},
+                    {"payee_id": payee_two_id, "amount_minor": 30000},
+                ],
+                "payment_mode": "WALLET",
+            },
+            token=token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        batch = PaymentBatch.objects.get(id=response.json()["batch"]["id"])
+        self.assertEqual(batch.instructions.count(), 2)
+        self.assertEqual(batch.description, "Quick pay to 2 recipients")
+        self.assertEqual(response.json()["batch"]["status"], "SUCCEEDED")
+        self.assertEqual(response.json()["batch"]["total_amount_minor"], 55000)
+        self.assertEqual(response.json()["batch"]["fee_amount_minor"], 1100)
+        self.assertEqual(response.json()["batch"]["gross_amount_minor"], 56100)
 
     def test_approval_required_schedules_are_skipped_by_autopay_runner(self):
         user = User.objects.create_user(

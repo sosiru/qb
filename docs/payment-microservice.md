@@ -18,7 +18,7 @@ PAYMENT_MICROSERVICE_URL=http://localhost:8001
 PAYMENT_MICROSERVICE_API_KEY=dummy-payment-api-key
 PAYMENT_MICROSERVICE_TIMEOUT_SECONDS=30
 PAYMENT_CALLBACK_URL=https://qb.lipasync.com/api/v1/payments/webhook/
-PAYMENT_WEBHOOK_SECRET=replace-with-a-random-secret
+PESAWAY_WEBHOOK_SECRET=replace-with-the-secret-from-pesaway
 ```
 
 Ratiba sends the API key as a Bearer token:
@@ -249,9 +249,8 @@ Timeout failure reasons are written to:
 ## Callback to Ratiba
 
 The microservice should send a callback when the provider reaches a final state.
-Ratiba includes `callback_url` in every live payment initiation request. The URL
-must be publicly reachable over HTTPS; a localhost URL cannot receive callbacks
-from a remote payment service.
+Configure the callback URL in PesaWay. It must be publicly reachable over HTTPS;
+a localhost URL cannot receive callbacks from a remote payment service.
 
 Callback URL:
 
@@ -266,7 +265,7 @@ At least one of `originator_ref` or `request_id` is required. `originator_ref` i
 ```bash
 curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: replace-with-a-random-secret" \
+  -H "X-Webhook-Signature: <lowercase-hmac-sha256-of-raw-body>" \
   -d '{
     "success": true,
     "originator_ref": "REQ-20260712-000042",
@@ -293,7 +292,7 @@ curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
 ```bash
 curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: replace-with-a-random-secret" \
+  -H "X-Webhook-Signature: <lowercase-hmac-sha256-of-raw-body>" \
   -d '{
     "success": false,
     "originator_ref": "REQ-20260712-000042",
@@ -357,7 +356,6 @@ Ratiba records non-2xx responses as dispatch failures, including the response bo
 | `operation` | Ratiba to microservice | Yes | `STK_PUSH`, `PAY_IN`, or `PAYOUT`. |
 | `phone_number` | Ratiba to microservice | Required for `STK_PUSH` | Normalized international format, for example `254700900001`. |
 | `destination` | Ratiba to microservice | Required for `PAYOUT` | Recipient-specific routing details. |
-| `callback_url` | Ratiba to microservice | Yes in live mode | Public endpoint that receives the final payment result. |
 | `success` | Microservice to Ratiba | Required for final state | `true` completes the transaction; `false` fails it. Omit while still processing. |
 | `transaction_receipt` | Microservice to Ratiba | Recommended on success | Used as the visible microservice reference. |
 | `confirmation_key` | Microservice to Ratiba | Optional | Stored on completed ledger transactions. |

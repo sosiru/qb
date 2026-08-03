@@ -211,7 +211,10 @@ PAYMENT_CALLBACK_URL = os.environ.get(
     "PAYMENT_CALLBACK_URL",
     "https://qb.lipasync.com/api/v1/payments/webhook/",
 ).strip()
-PAYMENT_WEBHOOK_SECRET = os.environ.get("PAYMENT_WEBHOOK_SECRET", "").strip()
+PESAWAY_WEBHOOK_SECRET = (
+    os.environ.get("PESAWAY_WEBHOOK_SECRET")
+    or os.environ.get("PAYMENT_WEBHOOK_SECRET", "")
+).strip()
 PESAWAY_SYSTEM_SLUG = os.environ.get("PESAWAY_SYSTEM_SLUG") or os.environ.get("SYSTEM_SLUG", "")
 PESAWAY_COLLECTION_EVENT_SLUG = os.environ.get("PESAWAY_COLLECTION_EVENT_SLUG", "")
 PESAWAY_B2C_EVENT_SLUG = os.environ.get("PESAWAY_B2C_EVENT_SLUG", "")
