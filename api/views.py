@@ -68,6 +68,8 @@ from eusers.services import change_user_password, login_user, register_user, upd
 from reports.models import ReportExport
 from reports.services import export_transactions_csv_rows, generate_transaction_statement_pdf, record_transaction_export
 from eusers.utils import normalize_phone_number
+from notifications.models import NotificationEvent
+from notifications.services import queue_product_update_notifications, serialize_in_app_notification
 
 from .auth import api_view, get_request_data, json_error, require_auth
 from .services import issue_integration_api_key, list_integration_api_keys, revoke_integration_api_key
@@ -1310,6 +1312,83 @@ def report_exports_view(request):
     except DomainError as exc:
         return _handle_domain_error(exc)
     return JsonResponse({"exports": [_serialize_report_export(export) for export in queryset[:50]]})
+
+
+@api_view
+@require_auth
+def notifications_view(request):
+    if request.method != "GET":
+        return json_error("Method not allowed.", status=405)
+    rows = (
+        NotificationEvent.objects.filter(
+            user=request.api_user,
+            channel="IN_APP",
+            scheduled_for__lte=timezone.now(),
+        )
+        .select_related("template")
+        .order_by(models.F("read_at").asc(nulls_first=True), "-created_at")[:50]
+    )
+    serialized = [serialize_in_app_notification(item) for item in rows]
+    return JsonResponse(
+        {
+            "notifications": serialized,
+            "unread_count": sum(1 for item in serialized if not item["read_at"]),
+        }
+    )
+
+
+@api_view
+@require_auth
+def notification_read_view(request, notification_id):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    notification = NotificationEvent.objects.filter(
+        id=notification_id,
+        user=request.api_user,
+        channel="IN_APP",
+    ).first()
+    if not notification:
+        raise Http404("Notification not found.")
+    if not notification.read_at:
+        notification.read_at = timezone.now()
+        notification.save(update_fields=["read_at", "updated_at"])
+    return JsonResponse({"notification": serialize_in_app_notification(notification)})
+
+
+@api_view
+@require_auth
+def notifications_read_all_view(request):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    now = timezone.now()
+    updated = NotificationEvent.objects.filter(
+        user=request.api_user,
+        channel="IN_APP",
+        read_at__isnull=True,
+    ).update(read_at=now, updated_at=now)
+    return JsonResponse({"updated": updated})
+
+
+@api_view
+@require_auth
+def notification_announcement_view(request):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    if request.api_user.account_type not in {User.AccountType.SUPERADMIN, User.AccountType.SERVICE_PROVIDER}:
+        return json_error("Only support admins can publish product announcements.", status=403)
+    data = get_request_data(request)
+    title = str(data.get("title") or "").strip()
+    body = str(data.get("body") or data.get("intro") or "").strip()
+    if not title or not body:
+        return json_error("title and body are required.", status=400)
+    context = {
+        "badge": str(data.get("badge") or "Major Update"),
+        "severity": str(data.get("severity") or "info"),
+        "cta_label": str(data.get("cta_label") or "View update"),
+        "cta_url": str(data.get("cta_url") or ""),
+    }
+    events = queue_product_update_notifications(title, body, context=context)
+    return JsonResponse({"created": len(events)}, status=201)
 
 
 @api_view

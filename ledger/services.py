@@ -686,6 +686,10 @@ class PaymentInterface:
                     receipt=payload.get("transaction_receipt") or "",
                     confirmation_key=payload.get("confirmation_key") or "",
                 )
+                if tx.transaction_type.name == "WalletTopup":
+                    from notifications.services import queue_wallet_topup_completed_notification
+
+                    queue_wallet_topup_completed_notification(tx)
             payment_request.status = PaymentRequest.Status.COMPLETED
             payment_request.last_error = ""
         else:

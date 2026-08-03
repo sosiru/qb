@@ -20,7 +20,7 @@ from api.models import IntegrationApiKey
 from audit.models import AuditLog
 from eusers.models import AccessToken, LoginOtp, User
 from eusers.utils import normalize_phone_number
-from notifications.services import queue_email_notification, queue_notifications_for_user
+from notifications.services import queue_email_notification, queue_notifications_for_user, queue_wallet_owner_notifications
 from ledger.models import Account, Transaction as LedgerTransactionRecord
 from ledger.services import (
     PaymentInterface,
@@ -1614,7 +1614,7 @@ def top_up_wallet(user, payload):
     phone_number = payment_stk_phone_number(user.phone_number)
     if not phone_number:
         raise ValidationError("A valid phone number is required to initiate wallet top-up STK.")
-    PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_stk_push(
+    payment_request = PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_stk_push(
         wallet,
         amount_minor=amount_minor,
         phone_number=phone_number,
@@ -1630,6 +1630,17 @@ def top_up_wallet(user, payload):
         },
     )
     wallet.refresh_from_db()
+    if payment_request.status == "PROCESSING":
+        queue_wallet_owner_notifications(
+            wallet,
+            "WALLET_TOPUP_REQUESTED",
+            {
+                "amount_minor": amount_minor,
+                "phone_number": phone_number,
+                "transaction_id": str(payment_request.transaction_id),
+            },
+            scheduled_for=timezone.now(),
+        )
     return wallet
 
 
@@ -1727,6 +1738,16 @@ def withdraw_to_mpesa(user, payload):
         },
     )
     primary_wallet.refresh_from_db()
+    queue_wallet_owner_notifications(
+        primary_wallet,
+        "WALLET_WITHDRAWAL_REQUESTED",
+        {
+            "amount_minor": amount_minor,
+            "phone_number": phone_number,
+            "transaction_id": str(payment_request.transaction_id),
+        },
+        scheduled_for=timezone.now(),
+    )
     AuditLog.objects.create(
         actor=user,
         action="wallet.withdrawal_requested",
@@ -2290,6 +2311,18 @@ def settle_batch(batch, actor, simulate_collection=True):
             wallet, _ = ensure_user_wallets(batch.user)
         required_total = batch.total_amount_minor + batch.fee_amount_minor
         if wallet.available_balance_minor < required_total:
+            queue_wallet_owner_notifications(
+                wallet,
+                "WALLET_LOW",
+                {
+                    "batch_id": str(batch.id),
+                    "wallet_balance_minor": wallet.available_balance_minor,
+                    "total_amount_minor": required_total,
+                    "shortfall_minor": required_total - wallet.available_balance_minor,
+                    "schedule_count": batch.instructions.count(),
+                },
+                scheduled_for=timezone.now(),
+            )
             _mark_batch_failure(batch, actor, "insufficient_wallet_balance")
             raise ValidationError("Insufficient wallet balance.")
 
@@ -2314,6 +2347,20 @@ def settle_batch(batch, actor, simulate_collection=True):
         if not payment_microservice_dispatch_enabled() or simulate_collection:
             complete_payout(ledger_tx)
         wallet.refresh_from_db()
+        low_wallet_threshold = getattr(settings, "NOTIFY_LOW_WALLET_THRESHOLD_MINOR", 0)
+        if low_wallet_threshold and wallet.available_balance_minor < low_wallet_threshold:
+            queue_wallet_owner_notifications(
+                wallet,
+                "WALLET_LOW",
+                {
+                    "batch_id": str(batch.id),
+                    "wallet_balance_minor": wallet.available_balance_minor,
+                    "total_amount_minor": low_wallet_threshold,
+                    "shortfall_minor": low_wallet_threshold - wallet.available_balance_minor,
+                    "schedule_count": batch.instructions.count(),
+                },
+                scheduled_for=timezone.now(),
+            )
         if payment_microservice_dispatch_enabled() and not simulate_collection:
             from_status = batch.status
             batch.status = PaymentBatch.Status.PROCESSING

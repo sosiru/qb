@@ -1,5 +1,6 @@
 import calendar
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.core import mail
@@ -9,9 +10,9 @@ from django.test.utils import override_settings
 from django.utils import timezone
 
 from audit.models import AuditLog
-from eusers.models import User
+from eusers.models import AccessToken, User
 from notifications.models import NotificationEvent
-from notifications.services import queue_notifications_for_user
+from notifications.services import create_all_reminder_notifications, queue_notifications_for_user
 from reports.models import ReportExport
 from ledger.models import Account
 from ledger.services import PaymentInterface, get_or_create_user_account, initiate_payout, unique_transaction_reference
@@ -19,6 +20,7 @@ from ledger.services import PaymentInterface, get_or_create_user_account, initia
 from .models import (
     OrganizationMembership,
     OutboxEvent,
+    Payee,
     PaymentBatch,
     PaymentInstruction,
     PaymentSchedule,
@@ -1127,6 +1129,120 @@ class QuickBundlPlatformTests(TestCase):
         self.assertEqual(mail.outbox[0].to, ["notify@example.com"])
         self.assertIn("Payment completed", mail.outbox[0].subject)
         self.assertTrue(mail.outbox[0].alternatives)
+
+    @override_settings(
+        NOTIFY_URL="https://notify.example/api/send",
+        NOTIFY_API_KEY="notify-key",
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="Quick Bundl <mvpmtech@gmail.com>",
+    )
+    def test_sms_dispatch_failure_does_not_break_notification_worker(self):
+        user = User.objects.create_user(
+            phone_number="254700000199",
+            password="StrongPass123!",
+            full_name="SMS Safe User",
+            email="sms-safe@example.com",
+            account_type="INDIVIDUAL",
+            email_notifications_enabled=False,
+            sms_notifications_enabled=True,
+        )
+        queue_notifications_for_user(user, "PAYMENT_SUCCESS", {"batch_id": "batch-safe", "total_amount_minor": 120000})
+
+        with patch("notifications.services.request.urlopen", side_effect=OSError("provider unavailable")):
+            call_command("process_notifications")
+
+        sms_event = NotificationEvent.objects.get(channel="SMS", event_type="PAYMENT_SUCCESS")
+        email_event = NotificationEvent.objects.get(channel="EMAIL", event_type="PAYMENT_SUCCESS")
+        self.assertEqual(sms_event.status, NotificationEvent.Status.FAILED)
+        self.assertIn("provider unavailable", sms_event.last_error)
+        self.assertEqual(sms_event.provider_response["email_backup"]["status"], "sent")
+        self.assertEqual(email_event.status, NotificationEvent.Status.SENT)
+        self.assertEqual(email_event.context["batch_id"], "batch-safe")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["sms-safe@example.com"])
+
+    def test_in_app_product_announcement_can_be_listed_and_marked_read(self):
+        user = User.objects.create_user(
+            phone_number="254700000188",
+            password="StrongPass123!",
+            full_name="Announcement User",
+            account_type=User.AccountType.INDIVIDUAL,
+        )
+        admin = User.objects.create_user(
+            phone_number="254700000187",
+            password="StrongPass123!",
+            full_name="Support Admin",
+            account_type=User.AccountType.SUPERADMIN,
+        )
+        _, admin_token = AccessToken.issue(admin)
+        _, user_token = AccessToken.issue(user)
+
+        response = self._post(
+            "/api/v1/notifications/announcements/",
+            {"title": "Transactions tab is live", "body": "You can now review every payment status in one place."},
+            token=admin_token,
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertGreaterEqual(response.json()["created"], 2)
+
+        response = self.client.get("/api/v1/notifications/", HTTP_AUTHORIZATION=f"Bearer {user_token}")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["unread_count"], 1)
+        notification = payload["notifications"][0]
+        self.assertEqual(notification["title"], "Transactions tab is live")
+        self.assertIsNone(notification["read_at"])
+
+        response = self._post(f"/api/v1/notifications/{notification['id']}/read/", {}, token=user_token)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.json()["notification"]["read_at"])
+
+    def test_reminder_generation_covers_due_low_wallet_and_overdue_payments(self):
+        today = timezone.localdate()
+        user = User.objects.create_user(
+            phone_number="254700000177",
+            password="StrongPass123!",
+            full_name="Reminder User",
+            email="reminder@example.com",
+            account_type=User.AccountType.INDIVIDUAL,
+            default_payment_mode=User.PaymentMode.WALLET,
+        )
+        ensure_user_wallets(user)
+        payee = Payee.objects.create(
+            user=user,
+            label="Rent",
+            payee_type=Payee.PayeeType.PAYBILL,
+            paybill_number="123456",
+            expense_category="housing",
+        )
+        PaymentSchedule.objects.create(
+            payee=payee,
+            amount_minor=100000,
+            day_of_month=(today + timedelta(days=3)).day,
+            next_due_date=today + timedelta(days=3),
+        )
+        PaymentSchedule.objects.create(
+            payee=payee,
+            amount_minor=200000,
+            day_of_month=today.day,
+            next_due_date=today,
+        )
+        PaymentSchedule.objects.create(
+            payee=payee,
+            amount_minor=300000,
+            day_of_month=(today - timedelta(days=2)).day,
+            next_due_date=today - timedelta(days=2),
+        )
+
+        created = create_all_reminder_notifications(today)
+
+        self.assertEqual(created["t_minus_3"], 2)
+        self.assertEqual(created["due_today"], 2)
+        self.assertEqual(created["low_wallet"], 2)
+        self.assertEqual(created["overdue"], 2)
+        self.assertEqual(NotificationEvent.objects.filter(event_type="WALLET_LOW").count(), 2)
+        overdue_event = NotificationEvent.objects.filter(event_type="OVERDUE_PAYMENT", channel="SMS").get()
+        self.assertEqual(overdue_event.context["oldest_overdue_days"], 2)
 
     def test_superadmin_can_use_individual_and_corporate_flows(self):
         response = self._post(

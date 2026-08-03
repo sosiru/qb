@@ -210,8 +210,9 @@ PAYMENT_MICROSERVICE_TIMEOUT_SECONDS = int(os.environ.get("PAYMENT_MICROSERVICE_
 
 NOTIFY_URL = os.environ.get("NOTIFY", "")
 NOTIFY_API_KEY = os.environ.get("NOTIFY_API_KEY") or os.environ.get("X-API-KEY", "")
-NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "route")
+NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "qb")
 NOTIFY_TIMEOUT_SECONDS = int(os.environ.get("NOTIFY_TIMEOUT_SECONDS", "30"))
+NOTIFY_LOW_WALLET_THRESHOLD_MINOR = int(os.environ.get("NOTIFY_LOW_WALLET_THRESHOLD_MINOR", "0"))
 
 EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
