@@ -2,7 +2,7 @@ name: Build Image & Trigger Deployment
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "develop" ]
 
 jobs:
 #  test:
@@ -42,15 +42,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Determine environment & select compose file
+      - name: Determine environment
         id: env
         run: |
           if [[ "${{ github.ref_name }}" == "main" || "${{ github.ref_name }}" == "master" ]]; then
             echo "env=prod" >> $GITHUB_OUTPUT
-            echo "compose_file=docker-compose.yml" >> $GITHUB_OUTPUT
           else
             echo "env=stage" >> $GITHUB_OUTPUT
-            echo "compose_file=docker-compose.stage.yml" >> $GITHUB_OUTPUT
           fi
 
       - name: Generate Docker Image Tag
@@ -75,15 +73,14 @@ jobs:
           tags: ${{ steps.tag.outputs.image_tag }}
           platforms: linux/amd64,linux/arm64/v8
 
-      - name: Encode selected docker-compose file
+      - name: Encode docker-compose file
         id: compose
         run: |
-          COMPOSE_FILE="${{ steps.env.outputs.compose_file }}"
-          if [ ! -f "$COMPOSE_FILE" ]; then
-            echo "Error: $COMPOSE_FILE not found in repository!"
+          if [ ! -f docker-compose.yml ]; then
+            echo "Error: docker-compose.yml not found in repository!"
             exit 1
           fi
-          COMPOSE_B64=$(base64 -w 0 "$COMPOSE_FILE")
+          COMPOSE_B64=$(base64 -w 0 docker-compose.yml)
           echo "b64=$COMPOSE_B64" >> $GITHUB_OUTPUT
 
       - name: Prepare env_secrets payload

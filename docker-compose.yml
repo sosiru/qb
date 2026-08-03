@@ -1,10 +1,5 @@
 version: "3.9"
 
-x-postgres-env: &postgres-env
-  POSTGRES_USER: postgres
-  POSTGRES_DB: postgres
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-
 x-django-env: &django-env
   DJANGO_DEBUG: false
   DJANGO_SETTINGS_MODULE: qb.settings
@@ -34,44 +29,33 @@ x-django-env: &django-env
 
 x-django-full-env: &django-full-env
   <<: [*django-env, *postgres-env]
+  DB_NAME: ${DATABASE_DB}
+  DB_USER: ${DATABASE_USER}
+  DB_PASSWORD: ${DATABASE_PASSWORD}
+  DB_HOST: ${DATABASE_HOST}
+  DB_PORT: ${DATABASE_PORT}
+
 
 x-app-image: &app-image ${IMAGE_TAG}
 
-networks:
-  backend:
-    driver: bridge
+x-common-labels: &common-labels
+  observability.app: qb
+  observability.environment: ${SHARED_ENV}
 
-volumes:
-  qb_postgres_data:
+networks:
+  default:
+    name: ${SHARED_NETWORK}
+    external: true
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: qb_postgres
-    restart: always
-    environment:
-      <<: *postgres-env
-    volumes:
-      - qb_postgres_data:/var/lib/postgresql/data
-    networks:
-      - backend
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres || exit 1" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-
   qb:
     image: *app-image
-    container_name: qb_app
+    container_name: ${SHARED_ENV}_qb_app
+    labels:
+      <<: *common-labels
+      observability.component: api
     environment:
-      <<: *django-full-env
-    depends_on:
-      postgres:
-        condition: service_healthy
+      <<: *django-env
     ports:
-      - "8012:8000"
-    networks:
-      - backend
+      - "${API_PORT}:8000"
     restart: always
