@@ -100,7 +100,7 @@ jobs:
             [PESAWAY_B2C_EVENT_SLUG]="${{ secrets.PESAWAY_B2C_EVENT_SLUG }}"
             [PESAWAY_B2B_EVENT_SLUG]="${{ secrets.PESAWAY_B2B_EVENT_SLUG }}"
             [PESAWAY_BANK_EVENT_SLUG]="${{ secrets.PESAWAY_BANK_EVENT_SLUG }}"
-            [NOTIFY]="${{ secrets.NOTIFY }}"
+            [NOTIFY]="https://notify.lipasync.com/api/core/send-notification/"
             [NOTIFY_API_KEY]="${{ secrets.NOTIFY_API_KEY }}"
             [NOTIFY_SYSTEM]="${{ secrets.NOTIFY_SYSTEM }}"
             [NOTIFY_TIMEOUT_SECONDS]="${{ secrets.NOTIFY_TIMEOUT_SECONDS }}"

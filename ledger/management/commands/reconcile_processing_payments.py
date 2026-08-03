@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from ledger.services import PaymentInterface
+from ledger.services import PaymentService
 
 
 class Command(BaseCommand):
@@ -25,7 +25,7 @@ class Command(BaseCommand):
         elif options["live"]:
             sandbox = False
 
-        processed = PaymentInterface(sandbox=sandbox).retry_stale_processing(
+        processed = PaymentService(sandbox=sandbox).retry_stale_processing(
             older_than_seconds=options["older_than_seconds"],
             limit=options["limit"],
             query_status=options["query_status"],

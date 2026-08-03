@@ -4,7 +4,7 @@ from django.conf import settings
 
 from base.models import PaymentBatch, PaymentInstruction
 from ledger.models import Transaction as LedgerTransactionRecord
-from ledger.services import PaymentInterface, get_or_create_user_account
+from ledger.services import PaymentService, get_or_create_user_account
 from base.services import mark_batch_collection_complete, record_batch_failure, record_instruction_failure
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def request_collection_for_batch(batch_id):
     if amount_minor <= 0:
         raise PaymentDispatchError("STK collection amount must be greater than zero.")
     account = get_or_create_user_account(batch.user)
-    payment_request = PaymentInterface(sandbox=_sandbox_enabled()).initiate_stk_push(
+    payment_request = PaymentService(sandbox=_sandbox_enabled()).initiate_stk_push(
         account,
         amount_minor=amount_minor,
         phone_number=batch.user.phone_number,
@@ -45,7 +45,7 @@ def dispatch_instruction(instruction_id):
     instruction = PaymentInstruction.objects.select_related("batch", "batch__user", "batch__organization").get(id=instruction_id)
     ledger_transaction_id = (instruction.batch.metadata or {}).get("ledger_transaction_id")
     ledger_transaction = LedgerTransactionRecord.objects.get(id=ledger_transaction_id) if ledger_transaction_id else None
-    payment_request = PaymentInterface(sandbox=_sandbox_enabled()).initiate_instruction_payout(
+    payment_request = PaymentService(sandbox=_sandbox_enabled()).initiate_instruction_payout(
         instruction,
         transaction_record=ledger_transaction,
         metadata={"batch_id": str(instruction.batch_id), "instruction_id": str(instruction.id)},

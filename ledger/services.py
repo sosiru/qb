@@ -453,7 +453,7 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
         return debit_tx, credit_tx
 
 
-class PaymentInterface:
+class PaymentService:
     PROCESSING_TIMEOUT_SECONDS = 180
     LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "SETTLED", "SUCCESS"}
     LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED", "MANUAL_REVIEW"}
@@ -1024,3 +1024,7 @@ class PaymentInterface:
 
     def _paybill_shortcode(self, destination):
         return str(destination.get("destination_shortcode") or destination.get("paybill_number") or "").strip()
+
+
+# Kept for integrations that imported the original class name.
+PaymentInterface = PaymentService

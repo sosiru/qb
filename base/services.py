@@ -23,7 +23,7 @@ from eusers.utils import normalize_phone_number
 from notifications.services import queue_email_notification, queue_notifications_for_user, queue_wallet_owner_notifications
 from ledger.models import Account, Transaction as LedgerTransactionRecord
 from ledger.services import (
-    PaymentInterface,
+    PaymentService,
     complete_pay_in,
     complete_payout,
     get_or_create_organization_account,
@@ -674,6 +674,10 @@ def login_user(payload):
                 "phone_number": user.phone_number,
                 "otp": dev_otp,
                 "expires_in": f"{LOGIN_OTP_TTL_MINUTES} minutes",
+                "message": (
+                    f"Your Ratiba login code is {dev_otp}. "
+                    f"It expires in {LOGIN_OTP_TTL_MINUTES} minutes. Do not share it."
+                ),
                 "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
             },
             scheduled_for=timezone.now(),
@@ -1608,7 +1612,7 @@ def top_up_wallet(user, payload):
     )
     if not phone_number:
         raise ValidationError("A valid phone number is required to initiate wallet top-up STK.")
-    payment_request = PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_stk_push(
+    payment_request = PaymentService(sandbox=should_simulate_wallet_topup(payload)).initiate_stk_push(
         wallet,
         amount_minor=amount_minor,
         phone_number=phone_number,
@@ -1717,7 +1721,7 @@ def withdraw_to_mpesa(user, payload):
     if primary_wallet.available_balance_minor < amount_minor:
         raise ValidationError("Insufficient wallet balance.")
 
-    payment_request = PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_payout(
+    payment_request = PaymentService(sandbox=should_simulate_wallet_topup(payload)).initiate_payout(
         primary_wallet,
         amount_minor=amount_minor,
         destination={"type": "MPESA", "phone_number": phone_number},

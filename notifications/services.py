@@ -23,6 +23,67 @@ class NotificationDispatchError(Exception):
     pass
 
 
+class NotificationInterface:
+    def __init__(self, *, base_url=None, api_key=None, timeout=None):
+        self.base_url = base_url or settings.NOTIFY_URL
+        self.api_key = api_key or settings.NOTIFY_API_KEY
+        self.timeout = timeout or settings.NOTIFY_TIMEOUT_SECONDS
+
+    def send_sms(self, message, recipients, *, unique_identifier=None, template=None):
+        return self._send(
+            "sms",
+            message,
+            recipients,
+            unique_identifier=unique_identifier,
+            template=template or settings.NOTIFY_SMS_TEMPLATE,
+        )
+
+    def send_email(self, message, recipients, *, unique_identifier=None, template=None):
+        return self._send(
+            "email",
+            message,
+            recipients,
+            unique_identifier=unique_identifier,
+            template=template or settings.NOTIFY_EMAIL_TEMPLATE,
+        )
+
+    def _send(self, notification_type, message, recipients, *, unique_identifier, template):
+        if isinstance(recipients, str):
+            recipients = [recipients]
+        recipients = [str(recipient).strip() for recipient in recipients if str(recipient).strip()]
+        if not recipients:
+            raise NotificationDispatchError("At least one notification recipient is required.")
+        if not self.base_url or not self.api_key:
+            raise NotificationDispatchError("Notification provider is not configured.")
+
+        payload = {
+            "notification_type": notification_type,
+            "template": template,
+            "unique_identifier": unique_identifier or str(uuid.uuid4()),
+            "recipients": recipients,
+            "context": {"message": str(message)},
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-KEY": self.api_key,
+        }
+        req = request.Request(
+            self.base_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else {"status": "sent"}
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8")
+            raise NotificationDispatchError(raw or f"Notification HTTP error {exc.code}.") from exc
+        except error.URLError as exc:
+            raise NotificationDispatchError(str(exc.reason)) from exc
+
+
 def notifications_dispatch_enabled():
     return bool(settings.NOTIFY_URL and settings.NOTIFY_API_KEY)
 
@@ -138,6 +199,10 @@ def build_notification_payload(event):
         "recipients": event.recipients,
         "context": {"message": str(message)},
     }
+
+
+def _notification_message(event):
+    return build_notification_payload(event)["context"]["message"]
 
 
 def _money_minor(value):
@@ -387,18 +452,18 @@ def send_sms_failure_backup_email(event, failure):
     backup_event.attempts += 1
     backup_event.save(update_fields=["status", "attempts", "updated_at"])
     try:
-        response = send_email_event(backup_event)
+        response = send_notification_event(backup_event)
     except Exception as exc:
         backup_event.status = NotificationEvent.Status.FAILED
         backup_event.last_error = str(exc)[:255]
-        backup_event.provider_response = {"error": str(exc), "transport": "smtp_backup"}
+        backup_event.provider_response = {"error": str(exc), "transport": "email_backup"}
         backup_event.save(update_fields=["status", "last_error", "provider_response", "updated_at"])
         return {"status": "failed", "event_id": str(backup_event.id), "error": str(exc)}
 
     backup_event.status = NotificationEvent.Status.SENT
     backup_event.sent_at = timezone.now()
     backup_event.last_error = ""
-    backup_event.provider_response = {**(response or {}), "transport": "smtp_backup"}
+    backup_event.provider_response = {**(response or {}), "transport": "email_backup"}
     backup_event.save(
         update_fields=["status", "sent_at", "last_error", "provider_response", "updated_at"]
     )
@@ -414,22 +479,13 @@ def send_notification_event(event):
             return send_email_event(event)
         raise NotificationDispatchError("Notification provider is not configured.")
 
-    payload = build_notification_payload(event)
-    headers = {
-        "Content-Type": "application/json",
-        "X-API-KEY": settings.NOTIFY_API_KEY,
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = request.Request(settings.NOTIFY_URL, data=body, headers=headers, method="POST")
-    try:
-        with request.urlopen(req, timeout=settings.NOTIFY_TIMEOUT_SECONDS) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw else {"status": "sent"}
-    except error.HTTPError as exc:
-        raw = exc.read().decode("utf-8")
-        raise NotificationDispatchError(raw or f"Notification HTTP error {exc.code}.") from exc
-    except error.URLError as exc:
-        raise NotificationDispatchError(str(exc.reason)) from exc
+    interface = NotificationInterface()
+    send = interface.send_email if event.channel == "EMAIL" else interface.send_sms
+    return send(
+        _notification_message(event),
+        event.recipients,
+        unique_identifier=event.unique_identifier,
+    )
 
 
 def process_notification_event(event):

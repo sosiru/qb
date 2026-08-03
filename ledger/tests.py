@@ -15,7 +15,7 @@ from .models import Account, BalanceLogEntry, PaymentRequest, Transaction
 from .services import (
     IdempotencyConflict,
     LedgerError,
-    PaymentInterface,
+    PaymentService,
     complete_pay_in,
     complete_payout,
     get_or_create_user_account,
@@ -87,8 +87,8 @@ class LedgerServiceTests(TestCase):
                 idempotency_key="topup-key-004",
             )
 
-    def test_payment_interface_sandbox_completes_webhook_flow(self):
-        payment_request = PaymentInterface(sandbox=True).initiate_stk_push(
+    def test_payment_service_sandbox_completes_webhook_flow(self):
+        payment_request = PaymentService(sandbox=True).initiate_stk_push(
             self.account,
             amount_minor=50000,
             phone_number="254700900001",
@@ -101,7 +101,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(Account.objects.count(), 1)
 
     @override_settings(PAYMENT_CALLBACK_URL="https://qb.example/api/v1/payments/webhook/")
-    def test_payment_interface_live_stk_uses_lipasync_payload(self):
+    def test_payment_service_live_stk_uses_lipasync_payload(self):
         response_payload = {
             "message": "Payment initiated successfully",
             "data": {
@@ -112,8 +112,8 @@ class LedgerServiceTests(TestCase):
             },
         }
 
-        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
-            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_stk_push(
+        with patch.object(PaymentService, "_post", return_value=response_payload) as post:
+            payment_request = PaymentService(sandbox=False, base_url="https://payments.example").initiate_stk_push(
                 self.account,
                 amount_minor=50000,
                 phone_number="254700900001",
@@ -143,7 +143,7 @@ class LedgerServiceTests(TestCase):
         PESAWAY_SYSTEM_SLUG="ratiba",
         PESAWAY_COLLECTION_EVENT_SLUG="collection",
     )
-    def test_payment_interface_pesaway_stk_uses_inbound_collection_payload(self):
+    def test_payment_service_pesaway_stk_uses_inbound_collection_payload(self):
         response_payload = {
             "success": True,
             "message": "Inbound payment initiated successfully",
@@ -155,8 +155,8 @@ class LedgerServiceTests(TestCase):
             },
         }
 
-        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
-            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.lipasync.com/api/v1/core").initiate_stk_push(
+        with patch.object(PaymentService, "_post", return_value=response_payload) as post:
+            payment_request = PaymentService(sandbox=False, base_url="https://payments.lipasync.com/api/v1/core").initiate_stk_push(
                 self.account,
                 amount_minor=50000,
                 phone_number="254700900001",
@@ -178,7 +178,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.request_id, "IN-STK-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
 
-        PaymentInterface().handle_webhook(
+        PaymentService().handle_webhook(
             {
                 "event": "inbound_payment.captured",
                 "inbound_payment_id": "IN-STK-001",
@@ -195,15 +195,15 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.transaction.transaction_receipt, "MPESA-RECEIPT-001")
         self.assertEqual(self.account.available_balance_minor, 50000)
 
-    def test_payment_interface_live_paybill_payout_uses_lipasync_b2b_payload(self):
+    def test_payment_service_live_paybill_payout_uses_lipasync_b2b_payload(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-B2B-001"))
         response_payload = {
             "message": "Payment initiated successfully",
             "data": {"payment_intent_id": "PI-B2B-001", "status": "INITIATED", "amount": "750.00", "currency": "KES"},
         }
 
-        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
-            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_payout(
+        with patch.object(PaymentService, "_post", return_value=response_payload) as post:
+            payment_request = PaymentService(sandbox=False, base_url="https://payments.example").initiate_payout(
                 self.account,
                 amount_minor=75000,
                 destination={"paybill_number": "600000", "account_reference": "INV-001"},
@@ -230,7 +230,7 @@ class LedgerServiceTests(TestCase):
         PESAWAY_B2B_EVENT_SLUG="b2b",
         PESAWAY_BANK_EVENT_SLUG="bank",
     )
-    def test_payment_interface_pesaway_payout_routes_by_destination(self):
+    def test_payment_service_pesaway_payout_routes_by_destination(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=300000, reference="FUND-PESAWAY-001"))
         response_payload = {
             "success": True,
@@ -238,8 +238,8 @@ class LedgerServiceTests(TestCase):
             "data": {"outbound_transfer_id": "OUT-001", "status": "QUEUED", "amount": "1000.000000", "currency": "KES"},
         }
 
-        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
-            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.lipasync.com/api/v1/core").initiate_payout(
+        with patch.object(PaymentService, "_post", return_value=response_payload) as post:
+            payment_request = PaymentService(sandbox=False, base_url="https://payments.lipasync.com/api/v1/core").initiate_payout(
                 self.account,
                 amount_minor=100000,
                 destination={"phone_number": "254700900001"},
@@ -291,11 +291,11 @@ class LedgerServiceTests(TestCase):
                 "data": {"outbound_transfer_id": f"OUT-ROUTE-{index}", "status": "QUEUED"},
             }
             with self.subTest(destination=destination), patch.object(
-                PaymentInterface,
+                PaymentService,
                 "_post",
                 return_value=response_payload,
             ) as post:
-                payment_request = PaymentInterface(
+                payment_request = PaymentService(
                     sandbox=False,
                     base_url="https://payments.lipasync.com/api/v1/core",
                 ).initiate_payout(self.account, amount_minor=50000, destination=destination)
@@ -315,7 +315,7 @@ class LedgerServiceTests(TestCase):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-CHANNEL"))
 
         with self.assertRaisesMessage(LedgerError, "mobile channel must be exactly MPESA or Airtel"):
-            PaymentInterface(
+            PaymentService(
                 sandbox=False,
                 base_url="https://payments.lipasync.com/api/v1/core",
             ).initiate_payout(
@@ -335,7 +335,7 @@ class LedgerServiceTests(TestCase):
             def read(self):
                 return b'{"success":true,"data":{"status":"QUEUED"}}'
 
-        interface = PaymentInterface(
+        interface = PaymentService(
             sandbox=False,
             base_url="https://payments.lipasync.com/api/v1/core",
             api_key="pesaway-api-key",
@@ -354,14 +354,14 @@ class LedgerServiceTests(TestCase):
     def test_pesaway_failed_webhook_fails_payout_and_releases_funds(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-FAIL"))
         with patch.object(
-            PaymentInterface,
+            PaymentService,
             "_post",
             return_value={
                 "success": True,
                 "data": {"outbound_transfer_id": "OUT-FAILED-001", "status": "QUEUED"},
             },
         ):
-            payment_request = PaymentInterface(
+            payment_request = PaymentService(
                 sandbox=False,
                 base_url="https://payments.lipasync.com/api/v1/core",
             ).initiate_payout(
@@ -370,7 +370,7 @@ class LedgerServiceTests(TestCase):
                 destination={"phone_number": "254700900001"},
             )
 
-        PaymentInterface().handle_webhook(
+        PaymentService().handle_webhook(
             {
                 "event": "outbound_transfer.failed",
                 "outbound_transfer_id": "OUT-FAILED-001",
@@ -392,17 +392,17 @@ class LedgerServiceTests(TestCase):
 
     def test_lipasync_processing_callback_keeps_payment_processing(self):
         with patch.object(
-            PaymentInterface,
+            PaymentService,
             "_post",
             return_value={"data": {"payment_intent_id": "PI-PENDING-001", "status": "INITIATED"}},
         ):
-            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_stk_push(
+            payment_request = PaymentService(sandbox=False, base_url="https://payments.example").initiate_stk_push(
                 self.account,
                 amount_minor=50000,
                 phone_number="254700900001",
             )
 
-        PaymentInterface().handle_webhook(
+        PaymentService().handle_webhook(
             {
                 "event": "payment.processing",
                 "payment_intent_id": "PI-PENDING-001",
@@ -420,17 +420,17 @@ class LedgerServiceTests(TestCase):
 
     def test_lipasync_captured_callback_completes_payment(self):
         with patch.object(
-            PaymentInterface,
+            PaymentService,
             "_post",
             return_value={"data": {"payment_intent_id": "PI-CAPTURED-001", "status": "INITIATED"}},
         ):
-            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.example").initiate_stk_push(
+            payment_request = PaymentService(sandbox=False, base_url="https://payments.example").initiate_stk_push(
                 self.account,
                 amount_minor=50000,
                 phone_number="254700900001",
             )
 
-        PaymentInterface().handle_webhook(
+        PaymentService().handle_webhook(
             {
                 "event": "payment.captured",
                 "payment_intent_id": "PI-CAPTURED-001",
@@ -451,7 +451,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(self.account.available_balance_minor, 50000)
 
         entry_count = BalanceLogEntry.objects.filter(balance_log__transaction=tx).count()
-        PaymentInterface().handle_webhook(
+        PaymentService().handle_webhook(
             {
                 "event": "payment.failed",
                 "payment_intent_id": "PI-CAPTURED-001",
@@ -488,7 +488,7 @@ class LedgerServiceTests(TestCase):
             originator_ref="STK-001",
             transaction_id=self.account.id,
         )
-        with patch("api.views.PaymentInterface.handle_webhook", return_value=handled_request) as handle_webhook:
+        with patch("api.views.PaymentService.handle_webhook", return_value=handled_request) as handle_webhook:
             response = self.client.post(
                 "/api/v1/payments/webhook/",
                 data=raw_payload,
@@ -521,8 +521,8 @@ class LedgerServiceTests(TestCase):
             created_at=timezone.now() - timezone.timedelta(minutes=4)
         )
 
-        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
-            processed = PaymentInterface(sandbox=False, base_url="http://payments.example").retry_stale_processing()
+        with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
+            processed = PaymentService(sandbox=False, base_url="http://payments.example").retry_stale_processing()
 
         self.assertEqual(processed, 1)
         post.assert_not_called()
@@ -562,7 +562,7 @@ class LedgerServiceTests(TestCase):
                 "provider_transaction_id": "PHY123456",
             },
         }
-        interface = PaymentInterface(
+        interface = PaymentService(
             sandbox=False,
             base_url="https://payments.lipasync.com/api/v1/core",
         )
@@ -603,8 +603,8 @@ class LedgerServiceTests(TestCase):
             created_at=timezone.now() - timezone.timedelta(minutes=4)
         )
 
-        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
-            processed = PaymentInterface(
+        with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
+            processed = PaymentService(
                 sandbox=False,
                 base_url="https://payments.lipasync.com/api/v1/core/payments/qb",
             ).retry_stale_processing(query_status=True)
@@ -641,7 +641,7 @@ class LedgerServiceTests(TestCase):
         )
         stdout = StringIO()
 
-        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
+        with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
             call_command(
                 "reconcile_processing_payments",
                 "--query-status",
@@ -698,8 +698,8 @@ class LedgerServiceTests(TestCase):
             created_at=timezone.now() - timezone.timedelta(minutes=4)
         )
 
-        with patch.object(PaymentInterface, "_post", return_value={"status": "PROCESSING"}) as post:
-            PaymentInterface(sandbox=False, base_url="http://payments.example").retry_stale_processing(query_status=True)
+        with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
+            PaymentService(sandbox=False, base_url="http://payments.example").retry_stale_processing(query_status=True)
 
         post.assert_called_once()
         payment_request.refresh_from_db()

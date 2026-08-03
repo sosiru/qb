@@ -20,7 +20,7 @@ from base.models import (
     PaymentInstruction,
 )
 from ledger.models import Account, Transaction as LedgerTransactionRecord
-from ledger.services import PaymentInterface
+from ledger.services import PaymentService
 from base.services import (
     DomainError,
     ValidationError,
@@ -1046,7 +1046,7 @@ def payment_webhook_view(request):
             return json_error("Invalid webhook signature.", status=401)
     try:
         payload = get_request_data(request)
-        payment_request = PaymentInterface().handle_webhook(payload)
+        payment_request = PaymentService().handle_webhook(payload)
     except Exception as exc:
         logger.warning("payment.webhook.failed error=%s", exc, exc_info=True)
         return json_error(str(exc), status=400)

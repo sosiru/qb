@@ -15,7 +15,7 @@ from notifications.models import NotificationEvent
 from notifications.services import create_all_reminder_notifications, queue_notifications_for_user
 from reports.models import ReportExport
 from ledger.models import Account
-from ledger.services import PaymentInterface, get_or_create_user_account, initiate_payout, unique_transaction_reference
+from ledger.services import PaymentService, get_or_create_user_account, initiate_payout, unique_transaction_reference
 
 from .models import (
     OrganizationMembership,
@@ -113,6 +113,7 @@ class RatibaPlatformTests(TestCase):
         self.assertEqual(response.json()["batch"]["status"], "SUCCEEDED")
         self.assertEqual(response.json()["batch"]["fee_amount_minor"], 6000)
 
+    @override_settings(DEBUG=True)
     def test_login_requires_otp_and_validates_generated_code_for_all_accounts(self):
         response = self._post(
             "/api/v1/auth/register/",
@@ -120,6 +121,7 @@ class RatibaPlatformTests(TestCase):
                 "phone_number": "254710956633",
                 "password": "StrongPass123!",
                 "full_name": "OTP User",
+                "email": "otp-user@example.com",
                 "account_type": "INDIVIDUAL",
             },
         )
@@ -137,6 +139,10 @@ class RatibaPlatformTests(TestCase):
         self.assertEqual(response.json()["phone_number"], "254710956633")
         dev_otp = response.json()["dev_otp"]
         self.assertRegex(dev_otp, r"^\d{5}$")
+        otp_events = NotificationEvent.objects.filter(event_type="LOGIN_OTP")
+        self.assertEqual({event.channel for event in otp_events}, {"EMAIL", "SMS"})
+        self.assertIn(dev_otp, otp_events.get(channel="SMS").context["message"])
+        self.assertIn(dev_otp, otp_events.get(channel="EMAIL").context["message"])
 
         response = self._post(
             "/api/v1/auth/login/",
@@ -1120,7 +1126,7 @@ class RatibaPlatformTests(TestCase):
         batch.metadata["ledger_transaction_id"] = str(ledger_transaction.id)
         batch.save(update_fields=["metadata", "updated_at"])
 
-        PaymentInterface(sandbox=True).initiate_instruction_payout(
+        PaymentService(sandbox=True).initiate_instruction_payout(
             instruction,
             transaction_record=ledger_transaction,
             metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id)},
@@ -1217,18 +1223,37 @@ class RatibaPlatformTests(TestCase):
         )
         queue_notifications_for_user(user, "PAYMENT_SUCCESS", {"batch_id": "batch-safe", "total_amount_minor": 120000})
 
-        with patch("notifications.services.request.urlopen", side_effect=OSError("provider unavailable")):
+        sent_channels = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"status":"queued"}'
+
+        def fail_sms_only(req, timeout):
+            channel = json.loads(req.data.decode("utf-8"))["notification_type"]
+            sent_channels.append(channel)
+            if channel == "sms":
+                raise OSError("SMS provider unavailable")
+            return FakeResponse()
+
+        with patch("notifications.services.request.urlopen", side_effect=fail_sms_only):
             call_command("process_notifications")
 
         sms_event = NotificationEvent.objects.get(channel="SMS", event_type="PAYMENT_SUCCESS")
         email_event = NotificationEvent.objects.get(channel="EMAIL", event_type="PAYMENT_SUCCESS")
         self.assertEqual(sms_event.status, NotificationEvent.Status.FAILED)
-        self.assertIn("provider unavailable", sms_event.last_error)
+        self.assertIn("SMS provider unavailable", sms_event.last_error)
         self.assertEqual(sms_event.provider_response["email_backup"]["status"], "sent")
         self.assertEqual(email_event.status, NotificationEvent.Status.SENT)
         self.assertEqual(email_event.context["batch_id"], "batch-safe")
-        self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(mail.outbox[0].to, ["sms-safe@example.com"])
+        self.assertEqual(sent_channels, ["sms", "email"])
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_in_app_product_announcement_can_be_listed_and_marked_read(self):
         user = User.objects.create_user(
