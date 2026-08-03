@@ -1,4 +1,5 @@
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -96,6 +97,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(self.account.available_balance_minor, 50000)
         self.assertEqual(Account.objects.count(), 1)
 
+    @override_settings(PAYMENT_CALLBACK_URL="https://qb.example/api/v1/payments/webhook/")
     def test_payment_interface_live_stk_uses_lipasync_payload(self):
         response_payload = {
             "message": "Payment initiated successfully",
@@ -121,6 +123,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payload["currency"], "KES")
         self.assertEqual(payload["external_reference"], payment_request.originator_ref)
         self.assertEqual(payload["idempotency_key"], payment_request.originator_ref)
+        self.assertEqual(payload["callback_url"], "https://qb.example/api/v1/payments/webhook/")
         self.assertEqual(
             payload["payment_payload"],
             {
@@ -132,6 +135,45 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.request_id, "PI-STK-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
         self.assertEqual(payment_request.request_payload["metadata"]["purpose"], "batch_collection")
+
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="ratiba",
+        PESAWAY_COLLECTION_EVENT_SLUG="collection",
+    )
+    def test_payment_interface_pesaway_stk_uses_inbound_collection_payload(self):
+        response_payload = {
+            "success": True,
+            "message": "Inbound payment initiated successfully",
+            "data": {
+                "inbound_payment_id": "IN-STK-001",
+                "status": "INITIATED",
+                "amount": "500.000000",
+                "currency": "KES",
+            },
+        }
+
+        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
+            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.lipasync.com/api/v1/core").initiate_stk_push(
+                self.account,
+                amount_minor=50000,
+                phone_number="254700900001",
+            )
+
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/inbound-payments/ratiba/collection/initiate/")
+        self.assertEqual(payload["amount"], "500.00")
+        self.assertEqual(payload["external_reference"], payment_request.originator_ref)
+        self.assertEqual(payload["idempotency_key"], payment_request.originator_ref)
+        self.assertEqual(
+            payload["provider_payload"],
+            {
+                "phone_number": "254700900001",
+                "channel": "MPESA",
+                "reason": "Wallet top-up",
+            },
+        )
+        self.assertEqual(payment_request.request_id, "IN-STK-001")
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
 
     def test_payment_interface_live_paybill_payout_uses_lipasync_b2b_payload(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-B2B-001"))
@@ -160,6 +202,35 @@ class LedgerServiceTests(TestCase):
             },
         )
         self.assertEqual(payment_request.request_id, "PI-B2B-001")
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="ratiba",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+        PESAWAY_B2B_EVENT_SLUG="b2b",
+        PESAWAY_BANK_EVENT_SLUG="bank",
+    )
+    def test_payment_interface_pesaway_payout_routes_by_destination(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=300000, reference="FUND-PESAWAY-001"))
+        response_payload = {
+            "success": True,
+            "message": "Outbound transfer queued",
+            "data": {"outbound_transfer_id": "OUT-001", "status": "QUEUED", "amount": "1000.000000", "currency": "KES"},
+        }
+
+        with patch.object(PaymentInterface, "_post", return_value=response_payload) as post:
+            payment_request = PaymentInterface(sandbox=False, base_url="https://payments.lipasync.com/api/v1/core").initiate_payout(
+                self.account,
+                amount_minor=100000,
+                destination={"phone_number": "254700900001"},
+            )
+
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/outbound-transfers/ratiba/b2c/initiate/")
+        self.assertEqual(payload["amount"], "1000.00")
+        self.assertEqual(payload["provider_payload"]["phone_number"], "254700900001")
+        self.assertEqual(payload["provider_payload"]["channel"], "MPESA")
+        self.assertEqual(payment_request.request_id, "OUT-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
 
     def test_lipasync_processing_callback_keeps_payment_processing(self):
@@ -221,6 +292,36 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(tx.status, Transaction.Status.COMPLETED)
         self.assertEqual(tx.transaction_receipt, "TX-CAPTURED-001")
         self.assertEqual(self.account.available_balance_minor, 50000)
+
+    @override_settings(PAYMENT_WEBHOOK_SECRET="callback-secret")
+    def test_payment_webhook_rejects_invalid_secret(self):
+        response = self.client.post(
+            "/api/v1/payments/webhook/",
+            data={"success": True, "originator_ref": "STK-001"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "Invalid webhook credentials.")
+
+    @override_settings(PAYMENT_WEBHOOK_SECRET="callback-secret")
+    def test_payment_webhook_accepts_configured_secret(self):
+        handled_request = SimpleNamespace(
+            status=PaymentRequest.Status.COMPLETED,
+            originator_ref="STK-001",
+            transaction_id=self.account.id,
+        )
+        with patch("api.views.PaymentInterface.handle_webhook", return_value=handled_request) as handle_webhook:
+            response = self.client.post(
+                "/api/v1/payments/webhook/",
+                data={"success": True, "originator_ref": "STK-001"},
+                content_type="application/json",
+                HTTP_X_WEBHOOK_SECRET="callback-secret",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], PaymentRequest.Status.COMPLETED)
+        handle_webhook.assert_called_once_with({"success": True, "originator_ref": "STK-001"})
 
     def test_retry_stale_processing_fails_request_after_timeout(self):
         tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-TIMEOUT-001")

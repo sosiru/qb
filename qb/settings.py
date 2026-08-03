@@ -203,14 +203,24 @@ AUTH_USER_MODEL = "eusers.User"
 
 BACKGROUND_COMMANDS_ENABLED = os.environ.get("BACKGROUND_COMMANDS_ENABLED", "1") == "1"
 
-PAYMENT_MICROSERVICE_URL = os.environ.get("PAYMENT_MICROSERVICE_URL", "")
-PAYMENT_MICROSERVICE_API_KEY = os.environ.get("PAYMENT_MICROSERVICE_API_KEY", "")
+PAYMENT_MICROSERVICE_URL = os.environ.get("PAYMENT_MICROSERVICE_URL") or os.environ.get("PESAWAY_BASE_URL", "")
+PAYMENT_MICROSERVICE_API_KEY = os.environ.get("PAYMENT_MICROSERVICE_API_KEY") or os.environ.get("PESAWAY_API_KEY", "")
 PAYMENT_MICROSERVICE_SANDBOX = _env_bool("PAYMENT_MICROSERVICE_SANDBOX", False)
 PAYMENT_MICROSERVICE_TIMEOUT_SECONDS = int(os.environ.get("PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", "30"))
+PAYMENT_CALLBACK_URL = os.environ.get(
+    "PAYMENT_CALLBACK_URL",
+    "https://qb.lipasync.com/api/v1/payments/webhook/",
+).strip()
+PAYMENT_WEBHOOK_SECRET = os.environ.get("PAYMENT_WEBHOOK_SECRET", "").strip()
+PESAWAY_SYSTEM_SLUG = os.environ.get("PESAWAY_SYSTEM_SLUG") or os.environ.get("SYSTEM_SLUG", "")
+PESAWAY_COLLECTION_EVENT_SLUG = os.environ.get("PESAWAY_COLLECTION_EVENT_SLUG", "")
+PESAWAY_B2C_EVENT_SLUG = os.environ.get("PESAWAY_B2C_EVENT_SLUG", "")
+PESAWAY_B2B_EVENT_SLUG = os.environ.get("PESAWAY_B2B_EVENT_SLUG", "")
+PESAWAY_BANK_EVENT_SLUG = os.environ.get("PESAWAY_BANK_EVENT_SLUG", "")
 
 NOTIFY_URL = os.environ.get("NOTIFY", "")
 NOTIFY_API_KEY = os.environ.get("NOTIFY_API_KEY") or os.environ.get("X-API-KEY", "")
-NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "qb")
+NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "ratiba")
 NOTIFY_TIMEOUT_SECONDS = int(os.environ.get("NOTIFY_TIMEOUT_SECONDS", "30"))
 NOTIFY_LOW_WALLET_THRESHOLD_MINOR = int(os.environ.get("NOTIFY_LOW_WALLET_THRESHOLD_MINOR", "0"))
 
@@ -220,7 +230,7 @@ EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "1") == "1"
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "mvpmtech@gmail.com")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", f"Quick Bundl <{EMAIL_HOST_USER}>")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", f"Ratiba <{EMAIL_HOST_USER}>")
 EMAIL_TIMEOUT = int(os.environ.get("EMAIL_TIMEOUT", "30"))
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")

@@ -1,4 +1,4 @@
-# Quick Bundl UI Feature Specification
+# Ratiba UI Feature Specification
 
 This document defines the product features that the UI must support across:
 

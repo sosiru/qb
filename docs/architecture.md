@@ -1,4 +1,4 @@
-# Quick Bundl MVP Architecture
+# Ratiba MVP Architecture
 
 ## 1. Goal
 Build the smallest backend that can safely support:
@@ -99,7 +99,7 @@ qb/
 │   ├── architecture.md
 │   └── database-schema.md
 ├── postman/
-│   └── quickbundl.postman_collection.json
+│   └── ratiba.postman_collection.json
 ├── qb/
 │   ├── settings.py
 │   ├── urls.py

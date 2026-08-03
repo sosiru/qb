@@ -38,7 +38,7 @@ def create_product_update_template(apps, schema_editor):
             "system": "qb",
             "provider_template": "in_app_product_update",
             "subject_template": "",
-            "description": "In-app announcement for major Quick Bundl updates.",
+            "description": "In-app announcement for major Ratiba updates.",
             "default_context": {"badge": "Product Update"},
             "active": True,
         },

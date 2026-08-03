@@ -57,7 +57,7 @@ DEFAULT_TEST_OTP_PHONE = "254710956633"
 DEFAULT_TEST_OTP_CODE = "123456"
 LOGIN_OTP_TTL_MINUTES = 10
 LOGIN_OTP_RETRY_AFTER_SECONDS = 60
-TRANSACTION_REF_GENERATOR = TransactionRefGenerator(prefix="QB")
+TRANSACTION_REF_GENERATOR = TransactionRefGenerator(prefix="RT")
 
 PAYMENT_BATCH_TRANSITIONS = {
     PaymentBatch.Status.DRAFT: {PaymentBatch.Status.PENDING_APPROVAL},
@@ -89,7 +89,7 @@ class InsufficientFundsError(DomainError):
 
 
 def generate_transaction_reference():
-    return unique_transaction_reference("QB")
+    return unique_transaction_reference("RT")
 
 
 def record_transaction_event(aggregate_type, aggregate_id, event_type, *, actor=None, from_status="", to_status="", payload=None, microservice_request_id=""):
@@ -1611,7 +1611,12 @@ def top_up_wallet(user, payload):
         else:
             wallet = primary_wallet
 
-    phone_number = payment_stk_phone_number(user.phone_number)
+    phone_number = payment_stk_phone_number(
+        payload.get("phone_number")
+        or payload.get("mobile_number")
+        or payload.get("stk_phone_number")
+        or user.phone_number
+    )
     if not phone_number:
         raise ValidationError("A valid phone number is required to initiate wallet top-up STK.")
     payment_request = PaymentInterface(sandbox=should_simulate_wallet_topup(payload)).initiate_stk_push(
@@ -1621,8 +1626,10 @@ def top_up_wallet(user, payload):
         idempotency_key=payload.get("idempotency_key") or "",
         metadata={
             "description": "Top up of funds",
+            "entry_type": "TOP_UP",
             "payment_service": payload.get("payment_service", "payment_microservice"),
             "wallet_type": wallet.wallet_type,
+            "stk_phone_number": phone_number,
             "base_amount_minor": amount_minor,
             "fee_amount_minor": 0,
             "gross_amount_minor": amount_minor,
