@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 import time
 from decimal import Decimal
@@ -24,6 +25,8 @@ from .models import (
     Transaction,
     TransactionType,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LedgerError(Exception):
@@ -788,19 +791,59 @@ class PaymentService:
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
         req = request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
+        correlation_id = payload.get("external_reference") or payload.get("originator_ref") or payload.get("request_id") or ""
+        started_at = time.monotonic()
+        logger.info(
+            "payment.interface.request.start method=POST path=%s correlation_id=%s sandbox=%s timeout_seconds=%s",
+            path,
+            correlation_id,
+            self.sandbox,
+            self.timeout,
+        )
         try:
             with request.urlopen(req, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
+                result = json.loads(raw) if raw else {}
+                logger.info(
+                    "payment.interface.request.success method=POST path=%s correlation_id=%s http_status=%s provider_status=%s duration_ms=%s",
+                    path,
+                    correlation_id,
+                    getattr(response, "status", None) or getattr(response, "code", None),
+                    result.get("status", "") if isinstance(result, dict) else "",
+                    round((time.monotonic() - started_at) * 1000),
+                )
+                return result
         except error.HTTPError as exc:
             raw = exc.read().decode("utf-8")
             try:
                 parsed = json.loads(raw) if raw else {}
             except ValueError:
                 parsed = {"raw": raw}
+            logger.warning(
+                "payment.interface.request.http_error method=POST path=%s correlation_id=%s http_status=%s duration_ms=%s",
+                path,
+                correlation_id,
+                exc.code,
+                round((time.monotonic() - started_at) * 1000),
+            )
             raise LedgerError(f"Payment microservice returned HTTP {exc.code}: {parsed}") from exc
         except error.URLError as exc:
+            logger.warning(
+                "payment.interface.request.network_error method=POST path=%s correlation_id=%s reason=%s duration_ms=%s",
+                path,
+                correlation_id,
+                exc.reason,
+                round((time.monotonic() - started_at) * 1000),
+            )
             raise LedgerError(str(exc.reason)) from exc
+        except Exception:
+            logger.exception(
+                "payment.interface.request.unexpected_error method=POST path=%s correlation_id=%s duration_ms=%s",
+                path,
+                correlation_id,
+                round((time.monotonic() - started_at) * 1000),
+            )
+            raise
 
     def _get(self, path):
         if not self.base_url:
@@ -811,19 +854,53 @@ class PaymentService:
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
         req = request.Request(f"{self.base_url}{path}", headers=headers, method="GET")
+        started_at = time.monotonic()
+        logger.info(
+            "payment.interface.request.start method=GET path=%s sandbox=%s timeout_seconds=%s",
+            path,
+            self.sandbox,
+            self.timeout,
+        )
         try:
             with request.urlopen(req, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
+                result = json.loads(raw) if raw else {}
+                logger.info(
+                    "payment.interface.request.success method=GET path=%s http_status=%s provider_status=%s duration_ms=%s",
+                    path,
+                    getattr(response, "status", None) or getattr(response, "code", None),
+                    result.get("status", "") if isinstance(result, dict) else "",
+                    round((time.monotonic() - started_at) * 1000),
+                )
+                return result
         except error.HTTPError as exc:
             raw = exc.read().decode("utf-8")
             try:
                 parsed = json.loads(raw) if raw else {}
             except ValueError:
                 parsed = {"raw": raw}
+            logger.warning(
+                "payment.interface.request.http_error method=GET path=%s http_status=%s duration_ms=%s",
+                path,
+                exc.code,
+                round((time.monotonic() - started_at) * 1000),
+            )
             raise LedgerError(f"Payment microservice returned HTTP {exc.code}: {parsed}") from exc
         except error.URLError as exc:
+            logger.warning(
+                "payment.interface.request.network_error method=GET path=%s reason=%s duration_ms=%s",
+                path,
+                exc.reason,
+                round((time.monotonic() - started_at) * 1000),
+            )
             raise LedgerError(str(exc.reason)) from exc
+        except Exception:
+            logger.exception(
+                "payment.interface.request.unexpected_error method=GET path=%s duration_ms=%s",
+                path,
+                round((time.monotonic() - started_at) * 1000),
+            )
+            raise
 
     def _supports_status_query(self):
         return self._is_pesaway_core() or ("lipasync.com" not in self.base_url and "/core/payments/qb" not in self.base_url)

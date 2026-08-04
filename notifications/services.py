@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import uuid
 from datetime import timedelta
 from urllib import error, request
@@ -73,15 +74,55 @@ class NotificationInterface:
             headers=headers,
             method="POST",
         )
+        started_at = time.monotonic()
+        logger.info(
+            "notification.interface.request.start type=%s identifier=%s template=%s recipient_count=%s timeout_seconds=%s",
+            notification_type,
+            payload["unique_identifier"],
+            template,
+            len(recipients),
+            self.timeout,
+        )
         try:
             with request.urlopen(req, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw else {"status": "sent"}
+                result = json.loads(raw) if raw else {"status": "sent"}
+                logger.info(
+                    "notification.interface.request.success type=%s identifier=%s http_status=%s provider_status=%s duration_ms=%s",
+                    notification_type,
+                    payload["unique_identifier"],
+                    getattr(response, "status", None) or getattr(response, "code", None),
+                    result.get("status", "") if isinstance(result, dict) else "",
+                    round((time.monotonic() - started_at) * 1000),
+                )
+                return result
         except error.HTTPError as exc:
             raw = exc.read().decode("utf-8")
+            logger.warning(
+                "notification.interface.request.http_error type=%s identifier=%s http_status=%s duration_ms=%s",
+                notification_type,
+                payload["unique_identifier"],
+                exc.code,
+                round((time.monotonic() - started_at) * 1000),
+            )
             raise NotificationDispatchError(raw or f"Notification HTTP error {exc.code}.") from exc
         except error.URLError as exc:
+            logger.warning(
+                "notification.interface.request.network_error type=%s identifier=%s reason=%s duration_ms=%s",
+                notification_type,
+                payload["unique_identifier"],
+                exc.reason,
+                round((time.monotonic() - started_at) * 1000),
+            )
             raise NotificationDispatchError(str(exc.reason)) from exc
+        except Exception:
+            logger.exception(
+                "notification.interface.request.unexpected_error type=%s identifier=%s duration_ms=%s",
+                notification_type,
+                payload["unique_identifier"],
+                round((time.monotonic() - started_at) * 1000),
+            )
+            raise
 
 
 def notifications_dispatch_enabled():
