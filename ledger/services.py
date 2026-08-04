@@ -784,18 +784,25 @@ class PaymentService:
     def _post(self, path, payload):
         if not self.base_url:
             raise LedgerError("PAYMENT_MICROSERVICE_URL is not configured.")
-        body = json.dumps(payload).encode("utf-8")
+        request_body = json.dumps(payload)
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-Api-Key"] = self.api_key
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
-        req = request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
+        req = request.Request(
+            f"{self.base_url}{path}",
+            data=request_body.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
         correlation_id = payload.get("external_reference") or payload.get("originator_ref") or payload.get("request_id") or ""
         started_at = time.monotonic()
         logger.info(
-            "payment.interface.request.start method=POST path=%s correlation_id=%s sandbox=%s timeout_seconds=%s",
-            path,
+            "payment.interface.request.start method=POST url=%s request_payload=%s correlation_id=%s sandbox=%s "
+            "timeout_seconds=%s",
+            req.full_url,
+            request_body,
             correlation_id,
             self.sandbox,
             self.timeout,
@@ -856,8 +863,8 @@ class PaymentService:
         req = request.Request(f"{self.base_url}{path}", headers=headers, method="GET")
         started_at = time.monotonic()
         logger.info(
-            "payment.interface.request.start method=GET path=%s sandbox=%s timeout_seconds=%s",
-            path,
+            "payment.interface.request.start method=GET url=%s sandbox=%s timeout_seconds=%s",
+            req.full_url,
             self.sandbox,
             self.timeout,
         )

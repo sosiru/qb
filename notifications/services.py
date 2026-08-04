@@ -68,15 +68,19 @@ class NotificationInterface:
             "Content-Type": "application/json",
             "X-API-KEY": self.api_key,
         }
+        request_body = json.dumps(payload)
         req = request.Request(
             self.base_url,
-            data=json.dumps(payload).encode("utf-8"),
+            data=request_body.encode("utf-8"),
             headers=headers,
             method="POST",
         )
         started_at = time.monotonic()
         logger.info(
-            "notification.interface.request.start type=%s identifier=%s template=%s recipient_count=%s timeout_seconds=%s",
+            "notification.interface.request.start method=POST url=%s request_payload=%s type=%s identifier=%s "
+            "template=%s recipient_count=%s timeout_seconds=%s",
+            req.full_url,
+            request_body,
             notification_type,
             payload["unique_identifier"],
             template,
