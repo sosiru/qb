@@ -32,10 +32,12 @@ from .services import (
     post_uncleared_wallet_entry,
     release_wallet_hold,
     run_due_wallet_autopayments,
+    should_simulate_wallet_topup,
     top_up_wallet,
 )
 
 
+@override_settings(PAYMENT_MICROSERVICE_URL="", PAYMENT_MICROSERVICE_SANDBOX=True)
 class RatibaPlatformTests(TestCase):
     fixtures = ["notification_templates.json"]
 
@@ -66,6 +68,15 @@ class RatibaPlatformTests(TestCase):
             self._idempotency_counter += 1
             headers["HTTP_IDEMPOTENCY_KEY"] = f"test-key-{self._idempotency_counter}"
         return self.client.delete(path, content_type="application/json", **headers)
+
+    @override_settings(PAYMENT_MICROSERVICE_URL="https://payments.example")
+    def test_wallet_topup_simulation_respects_settings_and_request_override(self):
+        self.assertTrue(should_simulate_wallet_topup())
+        self.assertFalse(should_simulate_wallet_topup({"simulate_collection": False}))
+        self.assertTrue(should_simulate_wallet_topup({"simulate_collection": True}))
+
+        with self.settings(PAYMENT_MICROSERVICE_SANDBOX=False):
+            self.assertFalse(should_simulate_wallet_topup())
 
     def test_individual_payment_flow(self):
         response = self._post(
@@ -479,12 +490,11 @@ class RatibaPlatformTests(TestCase):
         self.assertTrue(schedule_response.json()["schedule"]["requires_approval"])
 
         self._post("/api/v1/wallets/topups/", {"amount_minor": 1000000}, token=token)
-        with patch("base.services.payment_microservice_dispatch_enabled", return_value=True):
-            response = self._post(
-                "/api/v1/payments/pay-all/",
-                {"payment_mode": "WALLET", "simulate_collection": False},
-                token=token,
-            )
+        response = self._post(
+            "/api/v1/payments/pay-all/",
+            {"payment_mode": "WALLET", "simulate_collection": True},
+            token=token,
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["batch"]["status"], "SUCCEEDED")
 

@@ -787,7 +787,7 @@ class PaymentService:
         request_body = json.dumps(payload)
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["X-Api-Key"] = self.api_key
+            headers["X-API-KEY"] = self.api_key
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
         req = request.Request(
@@ -857,7 +857,7 @@ class PaymentService:
             raise LedgerError("PAYMENT_MICROSERVICE_URL is not configured.")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["X-Api-Key"] = self.api_key
+            headers["X-API-KEY"] = self.api_key
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
         req = request.Request(f"{self.base_url}{path}", headers=headers, method="GET")

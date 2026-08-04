@@ -342,10 +342,20 @@ class LedgerServiceTests(TestCase):
         )
         with patch("ledger.services.request.urlopen", return_value=FakeResponse()) as urlopen:
             interface._get("/outbound-transfers/00000000-0000-0000-0000-000000000000/status/")
+            interface._post(
+                "/inbound-payments/qb/collection/initiate/",
+                {
+                    "amount": "100.00",
+                    "idempotency_key": "test-key",
+                    "external_reference": "test-key",
+                    "provider_payload": {"phone_number": "254700900001"},
+                },
+            )
 
-        outgoing_request = urlopen.call_args.args[0]
-        self.assertEqual(outgoing_request.get_header("X-api-key"), "pesaway-api-key")
-        self.assertIsNone(outgoing_request.get_header("Authorization"))
+        for call in urlopen.call_args_list:
+            outgoing_request = call.args[0]
+            self.assertEqual(outgoing_request.get_header("X-api-key"), "pesaway-api-key")
+            self.assertIsNone(outgoing_request.get_header("Authorization"))
 
     @override_settings(
         PESAWAY_SYSTEM_SLUG="qb",

@@ -336,7 +336,7 @@ def should_simulate_wallet_topup(payload=None):
         return bool(payload.get("simulate"))
     if not getattr(settings, "PAYMENT_MICROSERVICE_URL", ""):
         return True
-    return not payment_microservice_dispatch_enabled()
+    return bool(getattr(settings, "PAYMENT_MICROSERVICE_SANDBOX", False))
 
 
 def payment_stk_phone_number(phone_number):
