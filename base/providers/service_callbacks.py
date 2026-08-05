@@ -11,7 +11,7 @@ KPLC_TOKEN_URL= "https://selfservice.kplc.co.ke/api/token"
 KPLC_LOCATION_URL= "https://selfservice.kplc.co.ke/api/sectorSupplies/4/?serialNumberMeter="
 KPLC_METER_URL="https://selfservice.kplc.co.ke/api/publicData/"
 
-class KPLCInterfa:
+class KPLCInterface:
     def __init__(self):
         self.token_url =KPLC_TOKEN_URL
         self.basic_auth = KPLC_BASIC_AUTH
@@ -115,12 +115,3 @@ def kplc_sms_message(data):
     )
 
 
-if __name__ == "__main__":
-    client = KPLC()
-    meter_number = "22213061744"
-    try:
-        result = client.get_meter_data(meter_number)
-        sms = kplc_sms(result)
-        print(sms)
-    except Exception as exc:
-        print(f"Error: {exc}")

@@ -9,6 +9,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from base.providers.service_callbacks import kplc_sms_message, KPLCInterface
 from .models import (
     Account,
     AccountFieldType,
@@ -679,6 +680,15 @@ class PaymentService:
                 from base.services import record_instruction_success
 
                 instruction = PaymentInstruction.objects.get(id=instruction_id)
+                if instruction.payee.paybill_number == "888880":
+                    client = KPLCInterface()
+                    meter_number = instruction.payee.account_number
+                    try:
+                        result = client.get_meter_data(meter_number)
+                        sms = kplc_sms_message(result)
+                        logger.info("KPLC Message",sms)
+                    except Exception as exc:
+                        print(f"Error: {exc}")
                 record_instruction_success(
                     instruction,
                     {"callback": payload, "payment_request_id": str(payment_request.id)},
