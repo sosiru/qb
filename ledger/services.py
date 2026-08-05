@@ -806,7 +806,6 @@ class PaymentService:
                 url,
                 json=payload,
                 headers=headers,
-                timeout=self.timeout,
             )
             logger.info("Response status: %s", response.status_code)
             response.raise_for_status()
