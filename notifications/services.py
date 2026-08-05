@@ -77,7 +77,6 @@ class NotificationInterface:
                 self.base_url,
                 json=payload,
                 headers=headers,
-                timeout=self.timeout,
             )
             logger.info("Response received. Status code: %s", response.status_code)
             response.raise_for_status()
