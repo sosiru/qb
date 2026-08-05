@@ -4,7 +4,7 @@ import secrets
 import time
 from decimal import Decimal
 from urllib import error, request
-
+import requests
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone

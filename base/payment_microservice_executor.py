@@ -1,7 +1,7 @@
 import logging
 
 from django.conf import settings
-
+import requests
 from base.models import PaymentBatch, PaymentInstruction
 from ledger.models import Transaction as LedgerTransactionRecord
 from ledger.services import PaymentService, get_or_create_user_account

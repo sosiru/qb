@@ -4,7 +4,7 @@ import time
 import uuid
 from datetime import timedelta
 from urllib import error, request
-
+import requests
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
