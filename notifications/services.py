@@ -48,84 +48,54 @@ class NotificationInterface:
             template=template or settings.NOTIFY_EMAIL_TEMPLATE,
         )
 
-    def _send(self, notification_type, message, recipients, *, unique_identifier, template):
+    def _send(self, notification_type, message, recipients, *, unique_identifier=None, template=None):
+        logger.info("Starting notification dispatch.")
         if isinstance(recipients, str):
             recipients = [recipients]
-        recipients = [str(recipient).strip() for recipient in recipients if str(recipient).strip()]
+        recipients = [r.strip() for r in recipients if r.strip()]
+        logger.info("Recipients: %s", recipients)
         if not recipients:
-            raise NotificationDispatchError("At least one notification recipient is required.")
-        if not self.base_url or not self.api_key:
-            raise NotificationDispatchError("Notification provider is not configured.")
-
+            logger.error("No recipients provided.")
+            raise NotificationDispatchError("No recipients provided.")
         payload = {
             "notification_type": notification_type,
             "template": template,
             "unique_identifier": unique_identifier or str(uuid.uuid4()),
             "recipients": recipients,
-            "context": {"message": str(message)},
+            "context": {
+                "message": str(message),
+            },
         }
+        logger.info("Payload prepared: %s", payload)
         headers = {
             "Content-Type": "application/json",
             "X-API-KEY": self.api_key,
         }
-        request_body = json.dumps(payload)
-        req = request.Request(
-            self.base_url,
-            data=request_body.encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        started_at = time.monotonic()
-        logger.info(
-            "notification.interface.request.start method=POST url=%s request_payload=%s type=%s identifier=%s "
-            "template=%s recipient_count=%s timeout_seconds=%s",
-            req.full_url,
-            request_body,
-            notification_type,
-            payload["unique_identifier"],
-            template,
-            len(recipients),
-            self.timeout,
-        )
+        logger.info("Sending POST request to %s", self.base_url)
         try:
-            with request.urlopen(req, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-                result = json.loads(raw) if raw else {"status": "sent"}
-                logger.info(
-                    "notification.interface.request.success type=%s identifier=%s http_status=%s provider_status=%s duration_ms=%s",
-                    notification_type,
-                    payload["unique_identifier"],
-                    getattr(response, "status", None) or getattr(response, "code", None),
-                    result.get("status", "") if isinstance(result, dict) else "",
-                    round((time.monotonic() - started_at) * 1000),
-                )
-                return result
-        except error.HTTPError as exc:
-            raw = exc.read().decode("utf-8")
-            logger.warning(
-                "notification.interface.request.http_error type=%s identifier=%s http_status=%s duration_ms=%s",
-                notification_type,
-                payload["unique_identifier"],
-                exc.code,
-                round((time.monotonic() - started_at) * 1000),
+            response = requests.post(
+                self.base_url,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout,
             )
-            raise NotificationDispatchError(raw or f"Notification HTTP error {exc.code}.") from exc
-        except error.URLError as exc:
-            logger.warning(
-                "notification.interface.request.network_error type=%s identifier=%s reason=%s duration_ms=%s",
-                notification_type,
-                payload["unique_identifier"],
-                exc.reason,
-                round((time.monotonic() - started_at) * 1000),
-            )
-            raise NotificationDispatchError(str(exc.reason)) from exc
-        except Exception:
+            logger.info("Response received. Status code: %s", response.status_code)
+            response.raise_for_status()
+            result = response.json()
+            logger.info("Notification sent successfully. Response: %s", result)
+            return result
+        except requests.HTTPError:
             logger.exception(
-                "notification.interface.request.unexpected_error type=%s identifier=%s duration_ms=%s",
-                notification_type,
-                payload["unique_identifier"],
-                round((time.monotonic() - started_at) * 1000),
+                "HTTP error while sending notification. Status: %s, Body: %s",
+                response.status_code,
+                response.text,
             )
+            raise NotificationDispatchError(response.text)
+        except requests.RequestException as e:
+            logger.exception("Network error while sending notification.")
+            raise NotificationDispatchError(str(e))
+        except Exception:
+            logger.exception("Unexpected error while sending notification.")
             raise
 
 
