@@ -307,11 +307,15 @@ def _event_view_model(event):
     user_name = context.get("user_name") or (event.user.full_name if event.user_id else "") or "there"
     amount = context.get("total_amount_minor") or context.get("amount_minor")
     details = []
-    cta_label = context.get("cta_label") or "Open QuickBills"
-    cta_url = context.get("cta_url") or context.get("invite_link") or getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200")
-    title = context.get("title") or "QuickBills update"
-    intro = context.get("intro") or "A QuickBills activity update is available for your account."
-    badge = context.get("badge") or event.event_type.replace("_", " ").title()
+    cta_label = _clean_text(context.get("cta_label"), fallback="Open QuickBills")
+    cta_url = _clean_text(
+        context.get("cta_url"),
+        context.get("invite_link"),
+        fallback=getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
+    )
+    title = _clean_text(context.get("title"), fallback="QuickBills update")
+    intro = _clean_text(context.get("intro"), fallback="A QuickBills activity update is available for your account.")
+    badge = _clean_text(context.get("badge"), fallback=event.event_type.replace("_", " ").title())
 
     if event.event_type == "SELF_ONBOARDING":
         title = "Welcome to QuickBills"
@@ -482,10 +486,10 @@ def _event_view_model(event):
             ("Why they were not approved", context.get("reason", "")),
         ]
     elif event.event_type == "PRODUCT_UPDATE":
-        title = context.get("title") or "QuickBills update"
-        intro = context.get("intro") or context.get("body") or "A new QuickBills update is available."
-        badge = context.get("badge") or "Product Update"
-        cta_label = context.get("cta_label") or "View update"
+        title = _clean_text(context.get("title"), fallback="QuickBills update")
+        intro = _clean_text(context.get("intro"), context.get("body"), fallback="A new QuickBills update is available.")
+        badge = _clean_text(context.get("badge"), fallback="Product Update")
+        cta_label = _clean_text(context.get("cta_label"), fallback="Open QuickBills")
 
     extra_details = context.get("details") or []
     if isinstance(extra_details, list):
