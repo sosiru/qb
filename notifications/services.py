@@ -102,6 +102,12 @@ def notifications_dispatch_enabled():
     return bool(settings.NOTIFY_URL and settings.NOTIFY_API_KEY)
 
 
+def notification_channel_enabled(event_type, channel):
+    if event_type == "LOGIN_SUCCESS" and channel == "SMS":
+        return settings.NOTIFY_LOGIN_SUCCESS_SMS_ENABLED
+    return True
+
+
 def _merge_context(template, context):
     merged = dict(template.default_context or {})
     merged.update(context or {})
@@ -154,6 +160,8 @@ def queue_notifications_for_user(user, event_type, context=None, scheduled_for=N
     created = []
     templates = NotificationTemplate.objects.filter(event_type=event_type, active=True).order_by("channel")
     for template in templates:
+        if not notification_channel_enabled(event_type, template.channel):
+            continue
         recipients = _recipients_for_channel(user, template.channel)
         if not recipients:
             continue
@@ -487,6 +495,9 @@ def send_sms_failure_backup_email(event, failure):
 def send_notification_event(event):
     if event.channel == "IN_APP":
         return {"status": "delivered_in_app"}
+
+    if not notification_channel_enabled(event.event_type, event.channel):
+        return {"status": "skipped", "reason": "notification channel disabled"}
 
     if not notifications_dispatch_enabled():
         if event.channel == "EMAIL":

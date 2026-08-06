@@ -1215,6 +1215,23 @@ class RatibaPlatformTests(TestCase):
         self.assertTrue(all(payload["headers"].get("X-api-key") == "notify-key" for payload in sent_payloads))
         self.assertEqual(len(mail.outbox), 0)
 
+    def test_login_success_notification_is_email_only(self):
+        user = User.objects.create_user(
+            phone_number="254700000098",
+            password="StrongPass123!",
+            full_name="Login User",
+            email="login@example.com",
+            account_type="INDIVIDUAL",
+            email_notifications_enabled=True,
+            sms_notifications_enabled=True,
+        )
+
+        events = queue_notifications_for_user(user, "LOGIN_SUCCESS", {"login_time": "Now"})
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].channel, "EMAIL")
+        self.assertFalse(NotificationEvent.objects.filter(event_type="LOGIN_SUCCESS", channel="SMS").exists())
+
     @override_settings(
         NOTIFY_SMS_TEMPLATE="sms_default",
         NOTIFY_EMAIL_TEMPLATE="email_default",

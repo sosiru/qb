@@ -228,6 +228,7 @@ NOTIFY_TIMEOUT_SECONDS = int(os.environ.get("NOTIFY_TIMEOUT_SECONDS", "30"))
 NOTIFY_LOW_WALLET_THRESHOLD_MINOR = int(os.environ.get("NOTIFY_LOW_WALLET_THRESHOLD_MINOR", "0"))
 NOTIFY_SMS_TEMPLATE = os.environ.get("NOTIFY_SMS_TEMPLATE", "sms_default")
 NOTIFY_EMAIL_TEMPLATE = os.environ.get("NOTIFY_EMAIL_TEMPLATE", "email_default")
+NOTIFY_LOGIN_SUCCESS_SMS_ENABLED = _env_bool("NOTIFY_LOGIN_SUCCESS_SMS_ENABLED", False)
 
 EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
