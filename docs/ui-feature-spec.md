@@ -1,4 +1,4 @@
-# Ratiba UI Feature Specification
+# QuickBills UI Feature Specification
 
 This document defines the product features that the UI must support across:
 

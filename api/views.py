@@ -473,7 +473,7 @@ def _handle_domain_error(exc):
 @api_view
 @require_auth
 def health_view(request):
-    return JsonResponse({"status": "ok", "service": "ratiba-backend"})
+    return JsonResponse({"status": "ok", "service": "quickbills-backend"})
 
 
 @api_view

@@ -1,13 +1,13 @@
 # Payment Microservice Sample Requests and Responses
 
-This document describes the payment microservice contract used by Ratiba.
+This document describes the payment microservice contract used by QuickBills.
 
-Ratiba calls the configured `PAYMENT_MICROSERVICE_URL` with:
+QuickBills calls the configured `PAYMENT_MICROSERVICE_URL` with:
 
 - `POST /transactions/initiate/`
 - `POST /transactions/status/`
 
-The microservice calls Ratiba back with:
+The microservice calls QuickBills back with:
 
 - `POST /api/v1/payments/webhook/`
 
@@ -21,7 +21,7 @@ PAYMENT_CALLBACK_URL=https://qb.lipasync.com/api/v1/payments/webhook/
 PESAWAY_WEBHOOK_SECRET=replace-with-the-secret-from-pesaway
 ```
 
-Ratiba sends the API key as a Bearer token:
+QuickBills sends the API key as a Bearer token:
 
 ```http
 Authorization: Bearer dummy-payment-api-key
@@ -40,7 +40,7 @@ Amounts are integer minor units. For KES, `100000` means KES 1,000.00.
 
 ## Initiate STK Push
 
-Ratiba sends this when collecting money from a user, for example wallet top-up or STK-funded batch payment.
+QuickBills sends this when collecting money from a user, for example wallet top-up or STK-funded batch payment.
 
 ### Request
 
@@ -70,11 +70,11 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 }
 ```
 
-Ratiba stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value. If a request stays in `PROCESSING` for more than 3 minutes, Ratiba fails it locally with a timeout failure reason.
+QuickBills stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value. If a request stays in `PROCESSING` for more than 3 minutes, QuickBills fails it locally with a timeout failure reason.
 
 ## Initiate Payout
 
-Ratiba sends this when dispatching a payment instruction to a mobile wallet, till, paybill, or bank destination.
+QuickBills sends this when dispatching a payment instruction to a mobile wallet, till, paybill, or bank destination.
 
 ### Request
 
@@ -161,7 +161,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 
 ## Query Transaction Status
 
-Ratiba calls this for payment requests that remain in `PROCESSING`. Requests that are still not final after 3 minutes are failed locally.
+QuickBills calls this for payment requests that remain in `PROCESSING`. Requests that are still not final after 3 minutes are failed locally.
 
 ### Request
 
@@ -186,7 +186,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/status/" \
 }
 ```
 
-If the response does not contain `success`, Ratiba treats it as informational and keeps the local payment request open until the 3-minute processing timeout is reached.
+If the response does not contain `success`, QuickBills treats it as informational and keeps the local payment request open until the 3-minute processing timeout is reached.
 
 ### Completed Response
 
@@ -215,11 +215,11 @@ If the response does not contain `success`, Ratiba treats it as informational an
 }
 ```
 
-Failure responses should include at least one human-readable reason field. Ratiba checks `failure_reason`, then `message`, then `error`.
+Failure responses should include at least one human-readable reason field. QuickBills checks `failure_reason`, then `message`, then `error`.
 
 ## Processing Timeout
 
-Ratiba fails any payment request that remains in `PROCESSING` for more than 180 seconds.
+QuickBills fails any payment request that remains in `PROCESSING` for more than 180 seconds.
 
 Run the reconciliation command periodically, for example every minute:
 
@@ -246,7 +246,7 @@ Timeout failure reasons are written to:
 - `base.PaymentInstruction.failure_reason`, for payout instruction requests
 - the batch failure metadata/event trail, for batch collection requests
 
-## Callback to Ratiba
+## Callback to QuickBills
 
 The microservice should send a callback when the provider reaches a final state.
 Configure the callback URL in PesaWay. It must be publicly reachable over HTTPS;
@@ -255,15 +255,15 @@ a localhost URL cannot receive callbacks from a remote payment service.
 Callback URL:
 
 ```text
-POST https://ratiba.example.com/api/v1/payments/webhook/
+POST https://quickbills.example.com/api/v1/payments/webhook/
 ```
 
-At least one of `originator_ref` or `request_id` is required. `originator_ref` is preferred because Ratiba creates it before dispatching the request.
+At least one of `originator_ref` or `request_id` is required. `originator_ref` is preferred because QuickBills creates it before dispatching the request.
 
 ### Successful Callback
 
 ```bash
-curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
+curl -X POST "https://quickbills.example.com/api/v1/payments/webhook/" \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Signature: <lowercase-hmac-sha256-of-raw-body>" \
   -d '{
@@ -277,7 +277,7 @@ curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
   }'
 ```
 
-### Ratiba Response
+### QuickBills Response
 
 ```json
 {
@@ -290,7 +290,7 @@ curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
 ### Failed Callback
 
 ```bash
-curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
+curl -X POST "https://quickbills.example.com/api/v1/payments/webhook/" \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Signature: <lowercase-hmac-sha256-of-raw-body>" \
   -d '{
@@ -303,7 +303,7 @@ curl -X POST "https://ratiba.example.com/api/v1/payments/webhook/" \
   }'
 ```
 
-### Ratiba Response
+### QuickBills Response
 
 ```json
 {
@@ -343,25 +343,25 @@ Content-Type: application/json
 }
 ```
 
-Ratiba records non-2xx responses as dispatch failures, including the response body in the local error message.
+QuickBills records non-2xx responses as dispatch failures, including the response body in the local error message.
 
 ## Field Reference
 
 | Field | Direction | Required | Notes |
 | --- | --- | --- | --- |
-| `originator_ref` | Ratiba to microservice | Yes | Unique Ratiba request reference. Echo it in every response and callback. |
-| `request_id` | Microservice to Ratiba | Recommended | Microservice/provider tracking ID. |
-| `amount_minor` | Ratiba to microservice | Yes | Integer amount in minor units. |
-| `currency` | Ratiba to microservice | Yes | Usually `KES`. |
-| `operation` | Ratiba to microservice | Yes | `STK_PUSH`, `PAY_IN`, or `PAYOUT`. |
-| `phone_number` | Ratiba to microservice | Required for `STK_PUSH` | Normalized international format, for example `254700900001`. |
-| `destination` | Ratiba to microservice | Required for `PAYOUT` | Recipient-specific routing details. |
-| `success` | Microservice to Ratiba | Required for final state | `true` completes the transaction; `false` fails it. Omit while still processing. |
-| `transaction_receipt` | Microservice to Ratiba | Recommended on success | Used as the visible microservice reference. |
-| `confirmation_key` | Microservice to Ratiba | Optional | Stored on completed ledger transactions. |
-| `message` | Microservice to Ratiba | Optional | Human-readable status detail. |
-| `failure_reason` | Microservice to Ratiba | Recommended on failure | Preferred human-readable failure reason. |
-| `error` | Microservice to Ratiba | Recommended on failure | Fallback human-readable failure reason. |
+| `originator_ref` | QuickBills to microservice | Yes | Unique QuickBills request reference. Echo it in every response and callback. |
+| `request_id` | Microservice to QuickBills | Recommended | Microservice/provider tracking ID. |
+| `amount_minor` | QuickBills to microservice | Yes | Integer amount in minor units. |
+| `currency` | QuickBills to microservice | Yes | Usually `KES`. |
+| `operation` | QuickBills to microservice | Yes | `STK_PUSH`, `PAY_IN`, or `PAYOUT`. |
+| `phone_number` | QuickBills to microservice | Required for `STK_PUSH` | Normalized international format, for example `254700900001`. |
+| `destination` | QuickBills to microservice | Required for `PAYOUT` | Recipient-specific routing details. |
+| `success` | Microservice to QuickBills | Required for final state | `true` completes the transaction; `false` fails it. Omit while still processing. |
+| `transaction_receipt` | Microservice to QuickBills | Recommended on success | Used as the visible microservice reference. |
+| `confirmation_key` | Microservice to QuickBills | Optional | Stored on completed ledger transactions. |
+| `message` | Microservice to QuickBills | Optional | Human-readable status detail. |
+| `failure_reason` | Microservice to QuickBills | Recommended on failure | Preferred human-readable failure reason. |
+| `error` | Microservice to QuickBills | Recommended on failure | Fallback human-readable failure reason. |
 
 ## Implementation Notes
 

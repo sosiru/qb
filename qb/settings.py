@@ -223,7 +223,7 @@ PESAWAY_BANK_EVENT_SLUG = os.environ.get("PESAWAY_BANK_EVENT_SLUG", "")
 
 NOTIFY_URL = os.environ.get("NOTIFY", "")
 NOTIFY_API_KEY = os.environ.get("NOTIFY_API_KEY") or os.environ.get("X-API-KEY", "")
-NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "ratiba")
+NOTIFY_SYSTEM = os.environ.get("NOTIFY_SYSTEM", "quickbills")
 NOTIFY_TIMEOUT_SECONDS = int(os.environ.get("NOTIFY_TIMEOUT_SECONDS", "30"))
 NOTIFY_LOW_WALLET_THRESHOLD_MINOR = int(os.environ.get("NOTIFY_LOW_WALLET_THRESHOLD_MINOR", "0"))
 NOTIFY_SMS_TEMPLATE = os.environ.get("NOTIFY_SMS_TEMPLATE", "sms_default")
@@ -236,7 +236,7 @@ EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "1") == "1"
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "mvpmtech@gmail.com")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", f"Ratiba <{EMAIL_HOST_USER}>")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", f"QuickBills <{EMAIL_HOST_USER}>")
 EMAIL_TIMEOUT = int(os.environ.get("EMAIL_TIMEOUT", "30"))
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")

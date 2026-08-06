@@ -10,5 +10,5 @@ Dear {{ user_name }},
 {{ cta_label }}: {{ cta_url }}
 {% endif %}
 
-If you did not expect this message, contact {{ support_email }}.
+Have a question or did not expect this message? Contact us at {{ support_email }}.
 Sent by {{ brand_name }} on {{ sent_at }}.

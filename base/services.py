@@ -675,7 +675,7 @@ def login_user(payload):
                 "otp": dev_otp,
                 "expires_in": f"{LOGIN_OTP_TTL_MINUTES} minutes",
                 "message": (
-                    f"Your Ratiba login code is {dev_otp}. "
+                    f"Your QuickBills login code is {dev_otp}. "
                     f"It expires in {LOGIN_OTP_TTL_MINUTES} minutes. Do not share it."
                 ),
                 "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),

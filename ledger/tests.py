@@ -140,7 +140,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.request_payload["metadata"]["purpose"], "batch_collection")
 
     @override_settings(
-        PESAWAY_SYSTEM_SLUG="ratiba",
+        PESAWAY_SYSTEM_SLUG="quickbills",
         PESAWAY_COLLECTION_EVENT_SLUG="collection",
     )
     def test_payment_service_pesaway_stk_uses_inbound_collection_payload(self):
@@ -163,7 +163,7 @@ class LedgerServiceTests(TestCase):
             )
 
         path, payload = post.call_args.args
-        self.assertEqual(path, "/inbound-payments/ratiba/collection/initiate/")
+        self.assertEqual(path, "/inbound-payments/quickbills/collection/initiate/")
         self.assertEqual(payload["amount"], "500.00")
         self.assertEqual(payload["external_reference"], payment_request.originator_ref)
         self.assertEqual(payload["idempotency_key"], payment_request.originator_ref)
@@ -225,7 +225,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
 
     @override_settings(
-        PESAWAY_SYSTEM_SLUG="ratiba",
+        PESAWAY_SYSTEM_SLUG="quickbills",
         PESAWAY_B2C_EVENT_SLUG="b2c",
         PESAWAY_B2B_EVENT_SLUG="b2b",
         PESAWAY_BANK_EVENT_SLUG="bank",
@@ -246,7 +246,7 @@ class LedgerServiceTests(TestCase):
             )
 
         path, payload = post.call_args.args
-        self.assertEqual(path, "/outbound-transfers/ratiba/b2c/initiate/")
+        self.assertEqual(path, "/outbound-transfers/quickbills/b2c/initiate/")
         self.assertEqual(payload["amount"], "1000.00")
         self.assertEqual(payload["provider_payload"]["phone_number"], "254700900001")
         self.assertEqual(payload["provider_payload"]["channel"], "MPESA")

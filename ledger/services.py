@@ -942,7 +942,7 @@ class PaymentService:
 
     def _pesaway_outbound_payload(self, destination):
         destination_type = str(destination.get("type") or "").upper()
-        reason = destination.get("reason") or "Ratiba payout"
+        reason = destination.get("reason") or "QuickBills payout"
         if destination.get("phone_number") or destination_type in {"MPESA", "MOBILE", "B2C"}:
             event_slug = getattr(settings, "PESAWAY_B2C_EVENT_SLUG", "")
             if not event_slug:
