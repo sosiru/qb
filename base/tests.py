@@ -12,7 +12,14 @@ from django.utils import timezone
 from audit.models import AuditLog
 from eusers.models import AccessToken, User
 from notifications.models import NotificationEvent
-from notifications.services import NotificationInterface, create_all_reminder_notifications, queue_notifications_for_user
+from notifications.services import (
+    NotificationInterface,
+    build_email_message,
+    build_notification_payload,
+    create_all_reminder_notifications,
+    queue_notifications_for_user,
+    serialize_in_app_notification,
+)
 from reports.models import ReportExport
 from ledger.models import Account
 from ledger.services import PaymentService, get_or_create_user_account, initiate_payout, unique_transaction_reference
@@ -21,6 +28,7 @@ from .models import (
     OrganizationMembership,
     OutboxEvent,
     Payee,
+    PayeePreset,
     PaymentBatch,
     PaymentInstruction,
     PaymentSchedule,
@@ -38,12 +46,21 @@ from .services import (
 
 
 @override_settings(PAYMENT_MICROSERVICE_URL="", PAYMENT_MICROSERVICE_SANDBOX=True)
-class RatibaPlatformTests(TestCase):
+class QuickBillsPlatformTests(TestCase):
     fixtures = ["notification_templates.json"]
 
     def setUp(self):
         self.client = Client()
         self._idempotency_counter = 0
+        PayeePreset.objects.get_or_create(
+            label="KPLC",
+            defaults={
+                "payee_type": Payee.PayeeType.PAYBILL,
+                "paybill_number": "888880",
+                "expense_category": "utilities",
+                "active": True,
+            },
+        )
 
     def _post(self, path, payload, token=None):
         headers = {}
@@ -844,7 +861,7 @@ class RatibaPlatformTests(TestCase):
                 "password": "StrongPass123!",
                 "full_name": "Finance Admin",
                 "account_type": "CORPORATE",
-                "organization_name": "Ratiba",
+                "organization_name": "QuickBills",
             },
         )
         admin_token = admin_response.json()["token"]
@@ -929,7 +946,7 @@ class RatibaPlatformTests(TestCase):
                 "password": "StrongPass123!",
                 "full_name": "Ops Admin",
                 "account_type": "CORPORATE",
-                "organization_name": "Ratiba Corp",
+                "organization_name": "QuickBills Corp",
             },
         )
         admin_token = admin_response.json()["token"]
@@ -1160,7 +1177,7 @@ class RatibaPlatformTests(TestCase):
         NOTIFY_API_KEY="notify-key",
         NOTIFY_SYSTEM="radicrunch",
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
-        DEFAULT_FROM_EMAIL="Ratiba <mvpmtech@gmail.com>",
+        DEFAULT_FROM_EMAIL="QuickBills <mvpmtech@gmail.com>",
     )
     def test_process_notifications_dispatches_sms_and_email(self):
         user = User.objects.create_user(
@@ -1231,6 +1248,104 @@ class RatibaPlatformTests(TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].channel, "EMAIL")
         self.assertFalse(NotificationEvent.objects.filter(event_type="LOGIN_SUCCESS", channel="SMS").exists())
+        subject, text_body, _ = build_email_message(events[0])
+        self.assertIn("New sign-in to your QuickBills account", subject)
+        self.assertIn("If this was not you, change your password immediately.", text_body)
+
+    def test_notifications_use_customer_friendly_language(self):
+        user = User.objects.create_user(
+            phone_number="254700000097",
+            password="StrongPass123!",
+            full_name="Payment Customer",
+            email="customer@example.com",
+            account_type="CORPORATE",
+            email_notifications_enabled=True,
+            sms_notifications_enabled=True,
+        )
+        cases = {
+            "SELF_ONBOARDING": {
+                "context": {"phone_number": user.phone_number, "account_type": "CORPORATE"},
+                "expected": "your account is ready",
+            },
+            "LOGIN_OTP": {
+                "context": {"otp": "12345", "expires_in": "10 minutes"},
+                "expected": "enter this code to sign in",
+            },
+            "ORGANIZATION_INVITE": {
+                "context": {
+                    "organization_name": "Example Company",
+                    "invited_by": "Alex",
+                    "role": "CHECKER",
+                },
+                "expected": "payment approver",
+            },
+            "WALLET_TOPUP_REQUESTED": {
+                "context": {"amount_minor": 100000},
+                "expected": "request to add kes 1,000.00",
+            },
+            "WALLET_TOPUP_COMPLETED": {
+                "context": {"amount_minor": 100000, "wallet_balance_minor": 250000},
+                "expected": "has been added to your wallet",
+            },
+            "WALLET_WITHDRAWAL_REQUESTED": {
+                "context": {"amount_minor": 50000},
+                "expected": "request to withdraw kes 500.00",
+            },
+            "WALLET_LOW": {
+                "context": {
+                    "wallet_balance_minor": 100000,
+                    "total_amount_minor": 150000,
+                    "shortfall_minor": 50000,
+                    "schedule_count": 2,
+                },
+                "expected": "wallet is short by kes 500.00",
+            },
+            "OVERDUE_PAYMENT": {
+                "context": {"schedule_count": 2, "total_amount_minor": 150000},
+                "expected": "you have 2 payments overdue",
+            },
+            "T_MINUS_3": {
+                "context": {"schedule_count": 2, "total_amount_minor": 150000},
+                "expected": "you have 2 payments totalling kes 1,500.00 due in 3 days",
+            },
+            "DUE_TODAY": {
+                "context": {"schedule_count": 1, "total_amount_minor": 75000},
+                "expected": "you have 1 payment totalling kes 750.00 due today",
+            },
+            "PAYMENT_SUCCESS": {
+                "context": {"batch_id": "PAY-123", "total_amount_minor": 450000},
+                "expected": "successfully sent your payment",
+            },
+            "PAYMENT_FAILURE": {
+                "context": {"batch_id": "PAY-124", "status": "FAILED"},
+                "expected": "could not send one or more of your payments",
+            },
+            "APPROVAL_REQUEST": {
+                "context": {"batch_id": "PAY-125", "total_amount_minor": 300000},
+                "expected": "ready for your review",
+            },
+            "BATCH_APPROVED": {
+                "context": {"batch_id": "PAY-126"},
+                "expected": "approved and are now being sent",
+            },
+            "BATCH_REJECTED": {
+                "context": {"batch_id": "PAY-127", "reason": "The amount needs to be corrected."},
+                "expected": "were not approved",
+            },
+        }
+
+        for event_type, case in cases.items():
+            with self.subTest(event_type=event_type):
+                events = queue_notifications_for_user(user, event_type, case["context"])
+                sms_event = next(event for event in events if event.channel == "SMS")
+                email_event = next(event for event in events if event.channel == "EMAIL")
+                sms_message = build_notification_payload(sms_event)["context"]["message"]
+                subject, text_body, _ = build_email_message(email_event)
+                customer_copy = f"{sms_message} {subject} {text_body}".lower()
+
+                self.assertIn(case["expected"].lower(), customer_copy)
+                for internal_term in ("batch", "instruction", "settlement", "execution", "payout"):
+                    self.assertNotIn(internal_term, customer_copy)
 
     @override_settings(
         NOTIFY_SMS_TEMPLATE="sms_default",
@@ -1301,7 +1416,7 @@ class RatibaPlatformTests(TestCase):
         NOTIFY_URL="https://notify.example/api/send",
         NOTIFY_API_KEY="notify-key",
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
-        DEFAULT_FROM_EMAIL="Ratiba <mvpmtech@gmail.com>",
+        DEFAULT_FROM_EMAIL="QuickBills <mvpmtech@gmail.com>",
     )
     def test_sms_dispatch_failure_does_not_break_notification_worker(self):
         user = User.objects.create_user(
@@ -1382,6 +1497,31 @@ class RatibaPlatformTests(TestCase):
         response = self._post(f"/api/v1/notifications/{notification['id']}/read/", {}, token=user_token)
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(response.json()["notification"]["read_at"])
+
+    def test_in_app_notification_popup_copy_has_quickbills_fallbacks(self):
+        user = User.objects.create_user(
+            phone_number="254700000189",
+            password="StrongPass123!",
+            full_name="Fallback User",
+            account_type=User.AccountType.INDIVIDUAL,
+        )
+        event = NotificationEvent.objects.create(
+            user=user,
+            channel="IN_APP",
+            event_type="PRODUCT_UPDATE",
+            status=NotificationEvent.Status.SENT,
+            scheduled_for=timezone.now(),
+            sent_at=timezone.now(),
+            recipients=[str(user.id)],
+            context={"title": " ", "body": " ", "badge": " ", "cta_label": " "},
+        )
+
+        notification = serialize_in_app_notification(event)
+
+        self.assertEqual(notification["title"], "QuickBills update")
+        self.assertEqual(notification["badge"], "Product Update")
+        self.assertIn("QuickBills", notification["body"])
+        self.assertEqual(notification["cta_label"], "Open QuickBills")
 
     def test_reminder_generation_covers_due_low_wallet_and_overdue_payments(self):
         today = timezone.localdate()
@@ -1477,7 +1617,7 @@ class RatibaPlatformTests(TestCase):
 
         response = self._post(
             "/api/v1/organizations/",
-            {"name": "Ratiba Ops"},
+            {"name": "QuickBills Ops"},
             token=token,
         )
         self.assertEqual(response.status_code, 201)

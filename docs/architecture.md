@@ -1,4 +1,4 @@
-# Ratiba MVP Architecture
+# QuickBills MVP Architecture
 
 ## 1. Goal
 Build the smallest backend that can safely support:
@@ -99,7 +99,7 @@ qb/
 │   ├── architecture.md
 │   └── database-schema.md
 ├── postman/
-│   └── ratiba.postman_collection.json
+│   └── quickbills.postman_collection.json
 ├── qb/
 │   ├── settings.py
 │   ├── urls.py

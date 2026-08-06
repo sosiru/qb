@@ -265,158 +265,225 @@ def _money_minor(value):
         return "KES 0.00"
 
 
+def _friendly_value(value, labels=None):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    labels = labels or {}
+    return labels.get(value.upper(), value.replace("_", " ").title())
+
+
+def _payment_count(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return "Payments"
+    return f"{count} payment" if count == 1 else f"{count} payments"
+
+
+def _payment_failure_reason(value):
+    reason = str(value or "").strip()
+    if not reason:
+        return ""
+    known_reasons = {
+        "insufficient_wallet_balance": "There was not enough money in your wallet.",
+    }
+    return known_reasons.get(
+        reason.lower(),
+        "We could not complete the payment. Try again, or contact us if the problem continues.",
+    )
+
+
+def _clean_text(*values, fallback=""):
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return fallback
+
+
 def _event_view_model(event):
     context = event.context or {}
     user_name = context.get("user_name") or (event.user.full_name if event.user_id else "") or "there"
     amount = context.get("total_amount_minor") or context.get("amount_minor")
     details = []
-    cta_label = context.get("cta_label") or "Open Ratiba"
+    cta_label = context.get("cta_label") or "Open QuickBills"
     cta_url = context.get("cta_url") or context.get("invite_link") or getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200")
-    title = context.get("title") or "Ratiba notification"
-    intro = context.get("intro") or "A Ratiba activity update is available for your account."
+    title = context.get("title") or "QuickBills update"
+    intro = context.get("intro") or "A QuickBills activity update is available for your account."
     badge = context.get("badge") or event.event_type.replace("_", " ").title()
 
     if event.event_type == "SELF_ONBOARDING":
-        title = "Welcome to Ratiba"
-        intro = "Your account is ready. You can now manage wallets, payees, scheduled payments, approvals, and reports from one secure workspace."
-        badge = "Account Created"
+        title = "Welcome to QuickBills"
+        intro = "Your account is ready. You can now add money, choose who to pay, schedule payments, approve team payments, and view your reports."
+        badge = "Account ready"
+        cta_label = "Go to your account"
         details = [
-            ("Account", user_name),
+            ("Name", user_name),
             ("Phone", context.get("phone_number", "")),
-            ("Account type", str(context.get("account_type", "")).replace("_", " ").title()),
+            ("Account type", _friendly_value(context.get("account_type"))),
         ]
     elif event.event_type == "LOGIN_OTP":
-        title = "Your Ratiba login code"
-        intro = "Use this one-time code to complete your login. Do not share it with anyone."
-        badge = "Secure Login"
-        cta_label = "Continue login"
+        title = "Your QuickBills login code"
+        intro = "Enter this code to sign in to your QuickBills account. For your security, do not share it with anyone."
+        badge = "Login code"
+        cta_label = "Continue signing in"
         details = [
             ("Login code", context.get("otp", "")),
             ("Expires in", context.get("expires_in", "10 minutes")),
             ("Phone", context.get("phone_number", "")),
         ]
     elif event.event_type == "LOGIN_SUCCESS":
-        title = "New Ratiba login"
-        intro = "A login to your account was completed. If this was not you, change your password immediately."
-        badge = "Login Complete"
+        title = "New sign-in to your QuickBills account"
+        intro = "Your QuickBills account was signed in to. If this was not you, change your password immediately."
+        badge = "Account sign-in"
+        cta_label = "Review your account"
         details = [
             ("Account", user_name),
             ("Phone", context.get("phone_number", "")),
             ("Time", context.get("login_time", "")),
         ]
     elif event.event_type == "ORGANIZATION_INVITE":
-        title = f"You're invited to {context.get('organization_name', 'Ratiba')}"
-        intro = f"{context.get('invited_by', 'A team admin')} invited you to join Ratiba as {context.get('role', 'a member')}."
-        badge = "Team Invite"
-        cta_label = "Accept invite"
+        title = f"You're invited to {context.get('organization_name', 'QuickBills')}"
+        role = _friendly_value(
+            context.get("role", "VIEWER"),
+            {
+                "ADMIN": "an administrator",
+                "MAKER": "a payment creator",
+                "CHECKER": "a payment approver",
+                "VIEWER": "a viewer",
+            },
+        )
+        intro = f"{context.get('invited_by', 'A team administrator')} invited you to join their QuickBills team as {role}."
+        badge = "Team invitation"
+        cta_label = "Accept invitation"
         details = [
-            ("Organization", context.get("organization_name", "")),
-            ("Role", context.get("role", "")),
-            ("Invite email", context.get("email", "")),
+            ("Team", context.get("organization_name", "")),
+            ("Your access", role.removeprefix("a ").removeprefix("an ").capitalize()),
+            ("Email", context.get("email", "")),
         ]
     elif event.event_type == "WALLET_TOPUP_REQUESTED":
-        title = "Wallet top-up started"
-        intro = "Your wallet top-up request has been received and is being processed."
-        badge = "Top-Up Started"
+        title = "We are adding money to your wallet"
+        intro = f"We received your request to add {_money_minor(context.get('amount_minor'))} to your wallet. We will let you know when the money is ready to use."
+        badge = "Money being added"
+        cta_label = "View your wallet"
         details = [
             ("Wallet", context.get("wallet_type", "")),
             ("Amount", _money_minor(context.get("amount_minor"))),
             ("Phone", context.get("phone_number", "")),
         ]
     elif event.event_type == "WALLET_TOPUP_COMPLETED":
-        title = "Wallet top-up completed"
-        intro = "Funds have been added to your wallet and are available for payments."
-        badge = "Wallet Funded"
+        title = "Money added to your wallet"
+        intro = f"{_money_minor(context.get('amount_minor'))} has been added to your wallet and is ready to use."
+        badge = "Money available"
+        cta_label = "View your wallet"
         details = [
             ("Wallet", context.get("wallet_type", "")),
             ("Amount", _money_minor(context.get("amount_minor"))),
             ("Available balance", _money_minor(context.get("wallet_balance_minor"))),
         ]
     elif event.event_type == "WALLET_WITHDRAWAL_REQUESTED":
-        title = "Wallet withdrawal requested"
-        intro = "Your wallet withdrawal request has been recorded for processing."
-        badge = "Withdrawal"
+        title = "Your withdrawal is being processed"
+        intro = f"We received your request to withdraw {_money_minor(context.get('amount_minor'))} from your wallet. We will update you when it is complete."
+        badge = "Withdrawal started"
+        cta_label = "View your wallet"
         details = [
             ("Amount", _money_minor(context.get("amount_minor"))),
             ("Phone", context.get("phone_number", "")),
             ("Available balance", _money_minor(context.get("wallet_balance_minor"))),
         ]
     elif event.event_type == "WALLET_LOW":
-        title = "Wallet balance is low"
-        intro = "Your wallet may not have enough funds for upcoming payments. Top up before the due date."
-        badge = "Low Wallet"
+        title = "Add money for your upcoming payments"
+        intro = f"Your wallet is short by {_money_minor(context.get('shortfall_minor'))} for payments due soon. Add money before they are due to avoid missed payments."
+        badge = "More money needed"
+        cta_label = "Add money"
         details = [
             ("Available balance", _money_minor(context.get("wallet_balance_minor"))),
-            ("Upcoming payments", _money_minor(context.get("total_amount_minor"))),
-            ("Shortfall", _money_minor(context.get("shortfall_minor"))),
-            ("Schedules", context.get("schedule_count", "")),
+            ("Payments due soon", _money_minor(context.get("total_amount_minor"))),
+            ("Amount to add", _money_minor(context.get("shortfall_minor"))),
+            ("Number of payments", context.get("schedule_count", "")),
         ]
     elif event.event_type == "OVERDUE_PAYMENT":
-        title = "Payment is overdue"
-        intro = "One or more scheduled payments are overdue. Review them and pay as soon as possible."
-        badge = "Overdue"
+        title = "You have overdue payments"
+        intro = f"You have {_payment_count(context.get('schedule_count')).lower()} overdue, totalling {_money_minor(context.get('total_amount_minor'))}. Review them and pay as soon as you can."
+        badge = "Payment overdue"
+        cta_label = "Review overdue payments"
         details = [
-            ("Overdue payments", context.get("schedule_count", "")),
-            ("Total amount", _money_minor(context.get("total_amount_minor"))),
-            ("Oldest due date", context.get("oldest_due_date", "")),
-            ("Days overdue", context.get("oldest_overdue_days", "")),
+            ("Number of payments", context.get("schedule_count", "")),
+            ("Amount overdue", _money_minor(context.get("total_amount_minor"))),
+            ("Earliest due date", context.get("oldest_due_date", "")),
+            ("Longest overdue", f"{context.get('oldest_overdue_days')} days" if context.get("oldest_overdue_days") is not None else ""),
         ]
     elif event.event_type in {"T_MINUS_3", "DUE_TODAY"}:
         due_copy = "due in 3 days" if event.event_type == "T_MINUS_3" else "due today"
-        title = f"Scheduled payments {due_copy}"
-        intro = "Review your upcoming commitments and keep your wallet funded before execution."
-        badge = "Payment Reminder"
+        title = f"You have payments {due_copy}"
+        intro = f"You have {_payment_count(context.get('schedule_count')).lower()} totalling {_money_minor(context.get('total_amount_minor'))} {due_copy}. Check that you have enough money available."
+        badge = "Payment reminder"
+        cta_label = "Review payments"
         details = [
-            ("Schedules", context.get("schedule_count", "")),
-            ("Total amount", _money_minor(context.get("total_amount_minor"))),
-            ("Payment mode", context.get("payment_mode", "")),
+            ("Number of payments", context.get("schedule_count", "")),
+            ("Amount due", _money_minor(context.get("total_amount_minor"))),
+            ("How you will pay", _friendly_value(context.get("payment_mode"), {"WALLET": "QuickBills wallet", "STK": "M-PESA prompt"})),
         ]
     elif event.event_type == "PAYMENT_SUCCESS":
-        title = "Payment completed"
-        intro = "Your payment batch has been completed successfully."
-        badge = "Payment Success"
+        title = "Your payments were sent successfully"
+        payout_count = context.get("payout_count")
+        recipient_name = context.get("recipient_name")
+        if payout_count:
+            payment_description = f"{_payment_count(payout_count).lower()} totalling {_money_minor(amount)}"
+        elif recipient_name:
+            payment_description = f"your payment of {_money_minor(amount)} to {recipient_name}"
+        else:
+            payment_description = f"your payment of {_money_minor(amount)}"
+        intro = f"We successfully sent {payment_description}. You can view the payment details in QuickBills."
+        badge = "Payment sent"
+        cta_label = "View payment details"
         details = [
-            ("Batch ID", context.get("batch_id", "")),
+            ("Payment reference", context.get("batch_id", "")),
             ("Amount", _money_minor(amount)),
             ("Sent by", context.get("sender_name", "")),
             ("Sender phone", context.get("sender_phone_number", "")),
             ("Recipient", context.get("recipient_name", "")),
             ("Recipient phone", context.get("recipient_phone_number", "")),
-            ("Payouts", context.get("payout_count", "")),
+            ("Number of recipients", context.get("payout_count", "")),
         ]
     elif event.event_type == "PAYMENT_FAILURE":
-        title = "Payment needs attention"
-        intro = "A payment failed or completed partially. Review the batch and resolve any failed instructions."
-        badge = "Action Needed"
+        title = "A payment needs your attention"
+        intro = "We could not send one or more of your payments. Open QuickBills to see what happened and try again."
+        badge = "Action needed"
+        cta_label = "Review payments"
         details = [
-            ("Batch ID", context.get("batch_id", "")),
-            ("Status", context.get("status", "FAILED")),
-            ("Reason", context.get("reason", "")),
+            ("Payment reference", context.get("batch_id", "")),
+            ("Result", _friendly_value(context.get("status", "FAILED"), {"FAILED": "Not sent", "PARTIAL": "Some payments were not sent"})),
+            ("What happened", _payment_failure_reason(context.get("reason"))),
         ]
     elif event.event_type == "APPROVAL_REQUEST":
-        title = "Approval required"
-        intro = "A payout batch is waiting for your review before funds are released."
-        badge = "Approval"
+        title = "Payments are waiting for your approval"
+        intro = f"Payments totalling {_money_minor(amount)} are ready for your review. Check the details and approve them before the money is sent."
+        badge = "Approval needed"
+        cta_label = "Review and approve"
         details = [
-            ("Batch ID", context.get("batch_id", "")),
-            ("Amount", _money_minor(amount)),
+            ("Payment reference", context.get("batch_id", "")),
+            ("Total amount", _money_minor(amount)),
         ]
     elif event.event_type == "BATCH_APPROVED":
-        title = "Batch approved"
-        intro = "Your submitted payout batch was approved and settlement has started."
-        badge = "Approved"
-        details = [("Batch ID", context.get("batch_id", "")), ("Organization", context.get("organization_id", ""))]
+        title = "Your payments were approved"
+        intro = "The payments you submitted were approved and are now being sent."
+        badge = "Payments approved"
+        cta_label = "View payments"
+        details = [("Payment reference", context.get("batch_id", ""))]
     elif event.event_type == "BATCH_REJECTED":
-        title = "Batch rejected"
-        intro = "Your submitted payout batch was rejected. Review the reason before resubmitting."
-        badge = "Rejected"
+        title = "Your payments were not approved"
+        intro = "The payments you submitted were not approved. Review the reason, make any needed changes, and submit them again."
+        badge = "Changes needed"
+        cta_label = "Review payments"
         details = [
-            ("Batch ID", context.get("batch_id", "")),
-            ("Reason", context.get("reason", "")),
+            ("Payment reference", context.get("batch_id", "")),
+            ("Why they were not approved", context.get("reason", "")),
         ]
     elif event.event_type == "PRODUCT_UPDATE":
-        title = context.get("title") or "Ratiba update"
-        intro = context.get("intro") or context.get("body") or "A new Ratiba update is available."
+        title = context.get("title") or "QuickBills update"
+        intro = context.get("intro") or context.get("body") or "A new QuickBills update is available."
         badge = context.get("badge") or "Product Update"
         cta_label = context.get("cta_label") or "View update"
 
@@ -425,7 +492,7 @@ def _event_view_model(event):
         details.extend(tuple(item) for item in extra_details if isinstance(item, (list, tuple)) and len(item) == 2)
 
     return {
-        "brand_name": "Ratiba",
+        "brand_name": "QuickBills",
         "title": title,
         "intro": intro,
         "badge": badge,
@@ -580,10 +647,10 @@ def ensure_product_update_template():
         defaults={
             "event_type": "PRODUCT_UPDATE",
             "channel": "IN_APP",
-            "system": "ratiba",
+            "system": "quickbills",
             "provider_template": "in_app_product_update",
             "subject_template": "",
-            "description": "In-app announcement for major Ratiba updates.",
+            "description": "In-app announcement for major QuickBills updates.",
             "default_context": {"badge": "Product Update"},
             "active": True,
         },
@@ -606,9 +673,9 @@ def ensure_product_update_template():
 def queue_product_update_notifications(title, body, users=None, context=None):
     template = ensure_product_update_template()
     base_context = {
-        "title": title,
-        "intro": body,
-        "body": body,
+        "title": _clean_text(title, fallback="QuickBills update"),
+        "intro": _clean_text(body, fallback="A new QuickBills update is available."),
+        "body": _clean_text(body, fallback="A new QuickBills update is available."),
         "badge": "Major Update",
     }
     base_context.update(context or {})
@@ -638,15 +705,16 @@ def queue_product_update_notifications(title, body, users=None, context=None):
 def serialize_in_app_notification(event):
     context = event.context or {}
     view_model = _event_view_model(event)
+    fallback_body = "A QuickBills activity update is available for your account."
     return {
         "id": str(event.id),
         "event_type": event.event_type,
-        "title": context.get("title") or view_model["title"],
-        "body": context.get("body") or context.get("intro") or view_model["intro"],
-        "badge": context.get("badge") or view_model["badge"],
-        "severity": context.get("severity") or "info",
-        "cta_label": context.get("cta_label") or view_model["cta_label"],
-        "cta_url": context.get("cta_url") or view_model["cta_url"],
+        "title": _clean_text(context.get("title"), view_model["title"], fallback="QuickBills update"),
+        "body": _clean_text(context.get("body"), context.get("intro"), view_model["intro"], fallback=fallback_body),
+        "badge": _clean_text(context.get("badge"), view_model["badge"], fallback="QuickBills"),
+        "severity": _clean_text(context.get("severity"), fallback="info").lower(),
+        "cta_label": _clean_text(context.get("cta_label"), view_model["cta_label"], fallback="Open QuickBills"),
+        "cta_url": _clean_text(context.get("cta_url"), view_model["cta_url"], fallback=getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200")),
         "read_at": event.read_at.isoformat() if event.read_at else None,
         "created_at": event.created_at.isoformat(),
         "sent_at": event.sent_at.isoformat() if event.sent_at else None,

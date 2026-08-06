@@ -1,8 +1,8 @@
 {
   "info": {
-    "name": "Ratiba Backend API",
+    "name": "QuickBills Backend API",
     "_postman_id": "9a7f4f8a-53a1-4dbc-b28b-7f4f95cd1234",
-    "description": "Complete Postman collection for the Ratiba backend API used by the UI integration.",
+    "description": "Complete Postman collection for the QuickBills backend API used by the UI integration.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -154,7 +154,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"254700000010\",\n  \"password\": \"StrongPass123!\",\n  \"full_name\": \"Finance Admin\",\n  \"account_type\": \"CORPORATE\",\n  \"organization_name\": \"Ratiba\"\n}"
+              "raw": "{\n  \"phone_number\": \"254700000010\",\n  \"password\": \"StrongPass123!\",\n  \"full_name\": \"Finance Admin\",\n  \"account_type\": \"CORPORATE\",\n  \"organization_name\": \"QuickBills\"\n}"
             },
             "url": "{{base_url}}/auth/register/"
           }
@@ -607,7 +607,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Ratiba Kenya\",\n  \"registration_number\": \"PVT-2019-004821\",\n  \"default_currency\": \"KES\",\n  \"push_notifications_enabled\": true,\n  \"sms_notifications_enabled\": true\n}"
+              "raw": "{\n  \"name\": \"QuickBills Kenya\",\n  \"registration_number\": \"PVT-2019-004821\",\n  \"default_currency\": \"KES\",\n  \"push_notifications_enabled\": true,\n  \"sms_notifications_enabled\": true\n}"
             },
             "url": "{{base_url}}/organizations/{{organization_id}}/"
           }

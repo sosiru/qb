@@ -1,6 +1,6 @@
 # PRD Coverage
 
-This file tracks the backend status against the current Ratiba PRD from a software-engineering perspective.
+This file tracks the backend status against the current QuickBills PRD from a software-engineering perspective.
 
 ## Implemented
 
