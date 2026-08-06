@@ -1,5 +1,9 @@
 from datetime import datetime
+from functools import lru_cache
 from io import BytesIO
+from pathlib import Path
+import struct
+import zlib
 
 from django.utils import timezone
 
@@ -55,16 +59,102 @@ def _pdf_escape(value):
     return str(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
+def _paeth_predictor(left, above, upper_left):
+    estimate = left + above - upper_left
+    distances = (abs(estimate - left), abs(estimate - above), abs(estimate - upper_left))
+    return (left, above, upper_left)[distances.index(min(distances))]
+
+
+@lru_cache(maxsize=4)
+def _load_png_for_pdf(path, max_dimension=320):
+    data = Path(path).read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("Statement logo must be a PNG image.")
+
+    position = 8
+    compressed = []
+    width = height = bit_depth = color_type = interlace = None
+    while position < len(data):
+        length = struct.unpack(">I", data[position:position + 4])[0]
+        chunk_type = data[position + 4:position + 8]
+        chunk_data = data[position + 8:position + 8 + length]
+        position += length + 12
+        if chunk_type == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", chunk_data)
+        elif chunk_type == b"IDAT":
+            compressed.append(chunk_data)
+        elif chunk_type == b"IEND":
+            break
+
+    if bit_depth != 8 or color_type not in {2, 6} or interlace != 0:
+        raise ValueError("Statement logo must be a non-interlaced 8-bit RGB or RGBA PNG image.")
+
+    channels = 4 if color_type == 6 else 3
+    row_size = width * channels
+    decoded = zlib.decompress(b"".join(compressed))
+    rows = []
+    previous = bytearray(row_size)
+    offset = 0
+    for _ in range(height):
+        filter_type = decoded[offset]
+        source = decoded[offset + 1:offset + 1 + row_size]
+        offset += row_size + 1
+        row = bytearray(row_size)
+        for index, value in enumerate(source):
+            left = row[index - channels] if index >= channels else 0
+            above = previous[index]
+            upper_left = previous[index - channels] if index >= channels else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            elif filter_type == 4:
+                predictor = _paeth_predictor(left, above, upper_left)
+            else:
+                raise ValueError(f"Unsupported PNG filter type: {filter_type}")
+            row[index] = (value + predictor) & 0xFF
+        rows.append(row)
+        previous = row
+
+    scale = min(1, max_dimension / max(width, height))
+    output_width = max(1, round(width * scale))
+    output_height = max(1, round(height * scale))
+    rgb = bytearray(output_width * output_height * 3)
+    output_index = 0
+    for output_y in range(output_height):
+        source_row = rows[min(height - 1, int(output_y / scale))]
+        for output_x in range(output_width):
+            source_index = min(width - 1, int(output_x / scale)) * channels
+            red, green, blue = source_row[source_index:source_index + 3]
+            alpha = source_row[source_index + 3] if channels == 4 else 255
+            rgb[output_index:output_index + 3] = (
+                (red * alpha + 255 * (255 - alpha)) // 255,
+                (green * alpha + 255 * (255 - alpha)) // 255,
+                (blue * alpha + 255 * (255 - alpha)) // 255,
+            )
+            output_index += 3
+    return output_width, output_height, zlib.compress(bytes(rgb), 9)
+
+
 class _StatementPdf:
     width = 595
     height = 842
     margin = 42
-    red = "1 0 0"
+    navy = "0.02 0.12 0.42"
+    blue = "0 0.49 0.82"
+    teal = "0 0.64 0.52"
+    pale_teal = "0.91 0.98 0.97"
     black = "0 0 0"
 
     def __init__(self):
         self.pages = []
         self.ops = []
+        logo_path = Path(__file__).resolve().parent / "static" / "reports" / "quickbills-logo.png"
+        self.logo = _load_png_for_pdf(logo_path)
 
     def render(self, title, customer_name, mobile_number, email, period, requested_at, summary, transactions):
         rows = self._rows(summary, transactions)
@@ -96,6 +186,13 @@ class _StatementPdf:
 
         font_id = add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
         bold_font_id = add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+        logo_width, logo_height, logo_data = self.logo
+        logo_id = add_object(
+            f"<< /Type /XObject /Subtype /Image /Width {logo_width} /Height {logo_height} "
+            f"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {len(logo_data)} >>\nstream\n".encode("latin-1")
+            + logo_data
+            + b"\nendstream"
+        )
         page_ids = []
         for content in self.pages:
             content_bytes = content.encode("latin-1", errors="replace")
@@ -104,7 +201,8 @@ class _StatementPdf:
             )
             page_id = add_object(
                 f"<< /Type /Page /Parent 0 0 R /MediaBox [0 0 {self.width} {self.height}] "
-                f"/Resources << /Font << /F1 {font_id} 0 R /F2 {bold_font_id} 0 R >> >> "
+                f"/Resources << /Font << /F1 {font_id} 0 R /F2 {bold_font_id} 0 R >> "
+                f"/XObject << /Logo {logo_id} 0 R >> >> "
                 f"/Contents {content_id} 0 R >>".encode("latin-1")
             )
             page_ids.append(page_id)
@@ -131,38 +229,40 @@ class _StatementPdf:
 
     def _new_page(self):
         self.ops = []
-        self._text("QUICK", 72, 782, 10, bold=True, color=self.red)
-        self._text("bundl", 72, 770, 9, color=self.red)
+        self._image("Logo", 42, 726, 92, 92)
 
     def _finish_page(self):
         self.pages.append("\n".join(self.ops))
         self.ops = []
 
     def _header(self, title, customer_name, mobile_number, email, period, requested_at, page_number):
-        self._text("QUICKBUNDL MONEY STATEMENT", 210, 778, 14, bold=True, color=self.red)
-        self._text("Customer Name:", 92, 716, 8, bold=True, color=self.red)
+        self._text("QUICKBILLS TRANSACTION STATEMENT", 170, 786, 14, bold=True, color=self.navy)
+        self._text("Schedule. Pay. Stay ahead.", 170, 768, 8, bold=True, color=self.teal)
+        self._line(145, 738, 553, 738, self.blue, 1.2)
+        self._text("Customer Name:", 92, 716, 8, bold=True, color=self.navy)
         self._text(customer_name, 205, 716, 8, bold=True)
-        self._text("Mobile Number:", 92, 698, 8, bold=True, color=self.red)
+        self._text("Mobile Number:", 92, 698, 8, bold=True, color=self.navy)
         self._text(mobile_number, 205, 698, 8, bold=True)
-        self._text("Email Address:", 92, 680, 8, bold=True, color=self.red)
+        self._text("Email Address:", 92, 680, 8, bold=True, color=self.navy)
         self._text(email, 205, 680, 8, bold=True)
-        self._text("Statement Period:", 92, 662, 8, bold=True, color=self.red)
+        self._text("Statement Period:", 92, 662, 8, bold=True, color=self.navy)
         self._text(period, 205, 662, 8, bold=True)
-        self._text("Request Date:", 92, 644, 8, bold=True, color=self.red)
+        self._text("Request Date:", 92, 644, 8, bold=True, color=self.navy)
         self._text(requested_at, 205, 644, 8, bold=True)
-        self._stamp(requested_at, title)
+        self._stamp(requested_at)
         if page_number > 1:
-            self._text("DETAILED STATEMENT CONTINUED", 210, 620, 11, bold=True, color=self.red)
+            self._text("DETAILED STATEMENT CONTINUED", 210, 620, 11, bold=True, color=self.navy)
 
-    def _stamp(self, requested_at, title):
-        self._rect(432, 652, 112, 62, stroke=self.red, width=1.4)
+    def _stamp(self, requested_at):
+        self._fill_rect(432, 652, 112, 62, self.pale_teal)
+        self._rect(432, 652, 112, 62, stroke=self.teal, width=1.4)
         self._text("Approved", 462, 696, 6.5, bold=True)
         self._text(requested_at, 494, 696, 6.5, bold=True)
-        self._text(title[:28], 445, 678, 6.5, bold=True)
-        self._text("STATEMENT VERIFIED", 455, 664, 6.5, color=self.red, bold=True)
+        self._text("Official QuickBills statement", 445, 678, 6.5, bold=True)
+        self._text("STATEMENT VERIFIED", 455, 664, 6.5, color=self.teal, bold=True)
 
     def _summary(self, summary):
-        self._text("SUMMARY", 275, 598, 11, bold=True, color=self.red)
+        self._text("SUMMARY", 275, 598, 11, bold=True, color=self.navy)
         rows = [
             ("Opening Balance", _money(summary.get("opening_balance_minor"))),
             ("Closing Balance", _money(summary.get("opening_balance_minor", 0) + summary.get("total_credits_minor", 0) - summary.get("total_debits_minor", 0))),
@@ -170,21 +270,22 @@ class _StatementPdf:
             ("Total Debit", _money(summary.get("total_debits_minor"))),
         ]
         y = 574
-        self._rect(80, y - 58, 435, 58, stroke=self.red, width=0.8)
+        self._fill_rect(80, y - 58, 435, 58, self.pale_teal)
+        self._rect(80, y - 58, 435, 58, stroke=self.blue, width=0.8)
         for label, value in rows:
-            self._line(80, y - 14, 515, y - 14, self.red, 0.6)
-            self._line(300, y, 300, y - 14, self.red, 0.6)
+            self._line(80, y - 14, 515, y - 14, self.blue, 0.6)
+            self._line(300, y, 300, y - 14, self.blue, 0.6)
             self._text(label, 84, y - 10, 6.5)
             self._text(value, 306, y - 10, 6.5)
             y -= 14
-        self._text("DETAILED STATEMENT", 252, 488, 11, bold=True, color=self.red)
+        self._text("DETAILED STATEMENT", 252, 488, 11, bold=True, color=self.navy)
 
     def _transaction_table(self, rows, top_y):
         headers = ["Transaction ID", "Transaction Date", "Description", "Status", "Principal", "Fee", "Gross", "Balance"]
         widths = [62, 62, 116, 56, 50, 45, 50, 59]
         x = 48
         y = top_y
-        self._fill_rect(x, y - 18, sum(widths), 18, self.red)
+        self._fill_rect(x, y - 18, sum(widths), 18, self.navy)
         cursor = x
         for header, width in zip(headers, widths):
             self._text(header, cursor + 3, y - 12, 5.4, bold=True, color="1 1 1")
@@ -193,7 +294,7 @@ class _StatementPdf:
         row_h = 22
         for row in rows:
             cursor = x
-            self._rect(x, y - row_h, sum(widths), row_h, stroke=self.red, width=0.5)
+            self._rect(x, y - row_h, sum(widths), row_h, stroke=self.blue, width=0.5)
             values = [
                 row["id"],
                 row["date"],
@@ -205,12 +306,12 @@ class _StatementPdf:
                 row["balance"],
             ]
             for value, width in zip(values, widths):
-                self._line(cursor, y, cursor, y - row_h, self.red, 0.4)
+                self._line(cursor, y, cursor, y - row_h, self.blue, 0.4)
                 self._text(str(value)[:30], cursor + 3, y - 9, 4.8)
                 if width > 70 and len(str(value)) > 30:
                     self._text(str(value)[30:60], cursor + 3, y - 17, 4.8)
                 cursor += width
-            self._line(cursor, y, cursor, y - row_h, self.red, 0.4)
+            self._line(cursor, y, cursor, y - row_h, self.blue, 0.4)
             y -= row_h
 
     def _rows(self, summary, transactions):
@@ -235,7 +336,7 @@ class _StatementPdf:
         return rows
 
     def _footer(self, page_number, page_count):
-        self._text("Generated by QuickBills. For support, quote the transaction ID shown on this statement.", 48, 32, 6, color=self.red)
+        self._text("Generated by QuickBills. For support, quote the transaction ID shown on this statement.", 48, 32, 6, color=self.navy)
         self._text(f"Page {page_number} of {page_count}", 505, 32, 6)
 
     def _text(self, text, x, y, size=8, bold=False, color=None):
@@ -262,3 +363,6 @@ class _StatementPdf:
 
     def _fill_rect(self, x, y, w, h, color):
         self.ops.append(f"{color} rg {x} {y} {w} {h} re f {self.black} rg")
+
+    def _image(self, name, x, y, width, height):
+        self.ops.append(f"q {width} 0 0 {height} {x} {y} cm /{name} Do Q")
