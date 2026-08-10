@@ -6,6 +6,9 @@ import logging
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.mail import EmailMessage
+from django.core.validators import validate_email
 from django.db import IntegrityError, models, transaction
 from django.http import Http404, HttpResponse, JsonResponse
 from django.utils import timezone
@@ -1287,6 +1290,60 @@ def transaction_statement_pdf_view(request):
     response = HttpResponse(pdf_bytes, content_type="application/pdf")
     response["Content-Disposition"] = f'attachment; filename="{file_name}"'
     return response
+
+
+@api_view
+@require_auth
+def transaction_statement_email_view(request):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    payload = get_request_data(request)
+    recipient = (payload.get("email") or "").strip().lower()
+    try:
+        validate_email(recipient)
+    except DjangoValidationError:
+        return json_error("A valid email address is required.", status=400)
+
+    try:
+        organization = None
+        organization_id = payload.get("organization_id")
+        if organization_id:
+            organization = get_organization_for_user(request.api_user, organization_id)
+        filters = {
+            "organization_id": organization_id,
+            "date_from": payload.get("date_from"),
+            "date_to": payload.get("date_to"),
+            "status": payload.get("status"),
+            "transaction_kind": payload.get("transaction_kind"),
+            "category": payload.get("category"),
+            "recipient_type": payload.get("recipient_type"),
+            "q": payload.get("q"),
+        }
+        pdf_bytes, file_name = generate_transaction_statement_pdf(
+            request.api_user,
+            organization=organization,
+            filters=filters,
+        )
+    except DomainError as exc:
+        return _handle_domain_error(exc)
+
+    message = EmailMessage(
+        subject="Your QuickBills transaction statement",
+        body="Attached is the QuickBills transaction statement you requested.",
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[recipient],
+    )
+    message.attach(file_name, pdf_bytes, "application/pdf")
+    message.send(fail_silently=False)
+
+    record_transaction_export(
+        request.api_user,
+        organization=organization,
+        file_name=file_name,
+        file_format=ReportExport.FileFormat.PDF,
+        filters={key: value for key, value in filters.items() if value},
+    )
+    return JsonResponse({"status": "sent", "email": recipient, "file_name": file_name})
 
 
 @api_view
