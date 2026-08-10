@@ -5,7 +5,7 @@ import requests
 from base.models import PaymentBatch, PaymentInstruction
 from ledger.models import Transaction as LedgerTransactionRecord
 from ledger.services import PaymentService, get_or_create_user_account
-from base.services import mark_batch_collection_complete, record_batch_failure, record_instruction_failure
+from base.services import mark_batch_collection_complete, process_kplc_payout_notification, record_batch_failure, record_instruction_failure
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,8 @@ def process_outbox_event(event):
         return request_collection_for_batch(event.aggregate_id, event.payload)
     if event.topic == "payment.instruction.dispatch":
         return dispatch_instruction(event.aggregate_id)
+    if event.topic == "payment.instruction.kplc_notification":
+        return process_kplc_payout_notification(event.aggregate_id)
     if event.topic in {
         "wallet.topup.completed",
         "payment.batch.succeeded",
@@ -105,6 +107,14 @@ def process_outbox_event(event):
 
 def fail_instruction_event(event, exc):
     if event.aggregate_type == "payment_instruction":
+        if event.topic == "payment.instruction.kplc_notification":
+            logger.warning(
+                "kplc.outbox.failed instruction_id=%s event_id=%s error=%s",
+                event.aggregate_id,
+                event.id,
+                exc,
+            )
+            return
         instruction = PaymentInstruction.objects.get(id=event.aggregate_id)
         record_instruction_failure(instruction, str(exc), microservice_response={"error": str(exc)})
         return

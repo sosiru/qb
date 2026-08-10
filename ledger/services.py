@@ -9,7 +9,6 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from base.providers.service_callbacks import kplc_sms_message, KPLCInterface
 from .models import (
     Account,
     AccountFieldType,
@@ -619,10 +618,11 @@ class PaymentService:
     def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None, metadata=None):
         originator_ref = originator_ref or tx.internal_reference
         metadata = metadata or tx.metadata or {}
+        request_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
         if self.sandbox:
             provider_path = ""
             provider_payload = {
-                "amount": self._amount_major(tx.amount_minor),
+                "amount": self._amount_major(request_amount_minor),
                 "currency": tx.currency,
                 "external_reference": originator_ref,
                 "idempotency_key": originator_ref,
@@ -642,7 +642,7 @@ class PaymentService:
             "originator_ref": originator_ref,
             "external_reference": originator_ref,
             "idempotency_key": originator_ref,
-            "amount_minor": tx.amount_minor,
+            "amount_minor": request_amount_minor,
             "amount": provider_payload["amount"],
             "currency": tx.currency,
             "operation": operation,
@@ -740,15 +740,6 @@ class PaymentService:
                 from base.services import record_instruction_success
 
                 instruction = PaymentInstruction.objects.get(id=instruction_id)
-                if instruction.payee.paybill_number == "888880":
-                    client = KPLCInterface()
-                    meter_number = instruction.payee.account_number
-                    try:
-                        result = client.get_meter_data(meter_number)
-                        sms = kplc_sms_message(result)
-                        logger.info("KPLC Message",sms)
-                    except Exception as exc:
-                        print(f"Error: {exc}")
                 record_instruction_success(
                     instruction,
                     {"callback": payload, "payment_request_id": str(payment_request.id)},
@@ -947,10 +938,11 @@ class PaymentService:
             )
         if operation == PaymentRequest.Operation.PAYOUT:
             destination = extra_payload.get("destination") or {}
+            payout_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
             return (
                 "/b2b_paybill/initiate/",
                 {
-                    "amount": self._amount_major(tx.amount_minor),
+                    "amount": self._amount_major(payout_amount_minor),
                     "currency": tx.currency,
                     "external_reference": originator_ref,
                     "idempotency_key": originator_ref,
@@ -985,10 +977,11 @@ class PaymentService:
             )
         if operation == PaymentRequest.Operation.PAYOUT:
             event_slug, provider_payload = self._pesaway_outbound_payload(extra_payload.get("destination") or {})
+            payout_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
             return (
                 f"/outbound-transfers/{system_slug}/{event_slug}/initiate/",
                 {
-                    "amount": self._amount_major_string(tx.amount_minor),
+                    "amount": self._amount_major_string(payout_amount_minor),
                     "idempotency_key": originator_ref,
                     "external_reference": originator_ref,
                     "provider_payload": provider_payload,

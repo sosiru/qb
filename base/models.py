@@ -1,4 +1,5 @@
 from django.db import models
+from django.template.defaultfilters import slugify
 from django.utils import timezone
 
 from base.common import TimestampedModel
@@ -153,14 +154,24 @@ class PayeePreset(TimestampedModel):
 class ExpenseCategory(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
     name = models.CharField(max_length=64, unique=True)
+    slug = models.SlugField(max_length=64, unique=True, blank=True)
     description = models.CharField(max_length=255, blank=True)
+    category_type = models.CharField(max_length=32, default="PAYMENT")
+    icon = models.CharField(max_length=64, blank=True)
+    display_order = models.PositiveIntegerField(default=1000)
     active = models.BooleanField(default=True)
+    is_system_defined = models.BooleanField(default=True)
 
     class Meta:
-        ordering = ["name", "created_at"]
+        ordering = ["display_order", "name", "created_at"]
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name).replace("-", "_")
+        super().save(*args, **kwargs)
 
 
 class BankDirectory(TimestampedModel):

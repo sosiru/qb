@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from audit.models import AuditLog
 from base.models import (
+    ExpenseCategory,
     IdempotencyRecord,
     OrganizationInvite,
     OrganizationMembership,
@@ -39,6 +40,7 @@ from base.services import (
     delete_schedule,
     build_approval_queue,
     build_transaction_summary,
+    calculate_payout_fee_amount_minor,
     get_batch_for_user,
     get_organization_for_user,
     get_payee_for_user,
@@ -81,6 +83,13 @@ from .auth import api_view, get_request_data, json_error, require_auth
 from .services import issue_integration_api_key, list_integration_api_keys, revoke_integration_api_key
 
 logger = logging.getLogger(__name__)
+
+
+def _category_label(slug):
+    if not slug:
+        return ""
+    category = ExpenseCategory.objects.filter(slug=slug).first()
+    return category.name if category else str(slug).replace("_", " ").title()
 
 
 IDEMPOTENT_MUTATION_TTL_SECONDS = 60
@@ -248,6 +257,7 @@ def _serialize_payee(payee):
         "bank_code": payee.bank_code,
         "account_number": payee.account_number,
         "expense_category": payee.expense_category,
+        "expense_category_label": _category_label(payee.expense_category),
         "active": payee.active,
         "status": "ACTIVE" if payee.active else "INACTIVE",
         "destination_label": destination_label,
@@ -263,6 +273,7 @@ def _serialize_payee_preset(preset):
         "paybill_number": preset.paybill_number,
         "till_number": preset.till_number,
         "expense_category": preset.expense_category,
+        "expense_category_label": _category_label(preset.expense_category),
         "active": preset.active,
     }
 
@@ -271,8 +282,14 @@ def _serialize_expense_category(category):
     return {
         "id": str(category.id),
         "name": category.name,
+        "slug": category.slug,
         "description": category.description,
+        "category_type": category.category_type,
+        "icon": category.icon,
+        "display_order": category.display_order,
         "active": category.active,
+        "is_active": category.active,
+        "is_system_defined": category.is_system_defined,
     }
 
 
@@ -286,7 +303,7 @@ def _serialize_bank(bank):
 
 
 def _serialize_schedule(schedule):
-    fee_amount_minor = (schedule.amount_minor * 200) // 10000
+    fee_amount_minor = calculate_payout_fee_amount_minor(schedule.amount_minor)
     return {
         "id": str(schedule.id),
         "payee_id": str(schedule.payee_id),
@@ -303,6 +320,7 @@ def _serialize_schedule(schedule):
         "active": schedule.active,
         "status": "ACTIVE" if schedule.active else "INACTIVE",
         "category": schedule.payee.expense_category,
+        "category_label": _category_label(schedule.payee.expense_category),
     }
 
 
@@ -474,6 +492,7 @@ def _serialize_instruction(instruction):
         "fee_amount_minor": instruction.fee_amount_minor,
         "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
         "category": instruction.category,
+        "category_label": _category_label(instruction.category),
         "external_reference": instruction.external_reference,
         "microservice_request_id": instruction.microservice_request_id,
         "status": instruction.status,

@@ -10,6 +10,7 @@ from reports.models import ReportExport
 
 from .models import (
     CircuitBreakerState,
+    ExpenseCategory,
     IdempotencyRecord,
     Organization,
     OrganizationMembership,
@@ -113,6 +114,52 @@ class NotificationEventInline(admin.TabularInline):
     can_delete = False
 
     def has_add_permission(self, request, obj=None):
+        return False
+
+
+def active_category_choices():
+    return [
+        (category.slug, category.name)
+        for category in ExpenseCategory.objects.filter(active=True).order_by("display_order", "name")
+    ]
+
+
+class CategoryChoiceAdminMixin:
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        if db_field.name in {"expense_category", "category"}:
+            kwargs["choices"] = active_category_choices()
+        return super().formfield_for_dbfield(db_field, request, **kwargs)
+
+
+@admin.register(ExpenseCategory)
+class ExpenseCategoryAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+    fields = (
+        "id",
+        "name",
+        "slug",
+        "description",
+        "category_type",
+        "icon",
+        "display_order",
+        "active",
+        "is_system_defined",
+        "created_at",
+        "updated_at",
+    )
+    list_display = ("name", "slug", "category_type", "display_order", "active", "is_system_defined", "payee_count", "schedule_count")
+    list_filter = ("category_type", "active", "is_system_defined")
+    search_fields = ("name", "slug", "description")
+    ordering = ("display_order", "name")
+
+    @admin.display(description="Directory entries")
+    def payee_count(self, obj):
+        return obj.payee_count if hasattr(obj, "payee_count") else Payee.objects.filter(expense_category=obj.slug).count()
+
+    @admin.display(description="Recurring payments")
+    def schedule_count(self, obj):
+        return PaymentSchedule.objects.filter(payee__expense_category=obj.slug).count()
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 
@@ -266,7 +313,7 @@ class OrganizationMembershipAdmin(TimestampedAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(Payee)
-class PayeeAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+class PayeeAdmin(CategoryChoiceAdminMixin, TimestampedAdminMixin, admin.ModelAdmin):
     list_display = (
         "label",
         "payee_type",
@@ -308,7 +355,7 @@ class PayeeAdmin(TimestampedAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(PayeePreset)
-class PayeePresetAdmin(TimestampedAdminMixin, admin.ModelAdmin):
+class PayeePresetAdmin(CategoryChoiceAdminMixin, TimestampedAdminMixin, admin.ModelAdmin):
     list_display = ("label", "payee_type", "paybill_number", "till_number", "expense_category", "active", "created_at")
     list_filter = ("payee_type", "active", "expense_category", "created_at")
     search_fields = ("id", "label", "paybill_number", "till_number", "expense_category")

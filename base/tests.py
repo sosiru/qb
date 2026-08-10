@@ -21,10 +21,11 @@ from notifications.services import (
     serialize_in_app_notification,
 )
 from reports.models import ReportExport
-from ledger.models import Account
+from ledger.models import Account, PaymentRequest
 from ledger.services import PaymentService, get_or_create_user_account, initiate_payout, unique_transaction_reference
 
 from .models import (
+    ExpenseCategory,
     OrganizationMembership,
     OutboxEvent,
     Payee,
@@ -34,6 +35,7 @@ from .models import (
     PaymentSchedule,
 )
 from .services import (
+    calculate_payout_fee_amount_minor,
     ensure_user_wallets,
     mark_wallet_entry_cleared,
     place_wallet_hold,
@@ -94,6 +96,68 @@ class QuickBillsPlatformTests(TestCase):
 
         with self.settings(PAYMENT_MICROSERVICE_SANDBOX=False):
             self.assertFalse(should_simulate_wallet_topup())
+
+    def test_payment_categories_are_predefined_and_searchable(self):
+        user = User.objects.create_user(
+            phone_number="254700000601",
+            password="StrongPass123!",
+            full_name="Category User",
+            account_type="INDIVIDUAL",
+        )
+        _, token = AccessToken.issue(user)
+
+        response = self.client.get("/api/v1/payee-categories/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 200)
+        categories = response.json()["categories"]
+        slugs = {category["slug"] for category in categories}
+        self.assertGreaterEqual(len(slugs), 15)
+        self.assertIn("electricity", slugs)
+        self.assertIn("professional_business_services", slugs)
+
+        response = self.client.get("/api/v1/payee-categories/?q=internet", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["categories"][0]["slug"], "internet")
+
+    def test_payee_category_must_be_predefined_slug(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000602",
+                "password": "StrongPass123!",
+                "full_name": "Taxonomy User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        token = response.json()["token"]
+
+        response = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Kenya Power",
+                "payee_type": "PAYBILL",
+                "paybill_number": "888880",
+                "account_reference": "ACC123",
+                "expense_category": "electricity",
+            },
+            token=token,
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["payee"]["expense_category"], "electricity")
+        self.assertEqual(response.json()["payee"]["expense_category_label"], "Electricity")
+
+        response = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Loose Category",
+                "payee_type": "MOBILE",
+                "phone_number": "254700111222",
+                "expense_category": "My Monthly Bills",
+            },
+            token=token,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(ExpenseCategory.objects.filter(name="My Monthly Bills").exists())
 
     def test_individual_payment_flow(self):
         response = self._post(
@@ -1278,6 +1342,231 @@ class QuickBillsPlatformTests(TestCase):
             self.assertEqual(event.context["recipient_phone_number"], "254711222333")
             self.assertEqual(event.context["sender_name"], "Payout Sender")
             self.assertEqual(event.context["sender_phone_number"], "254700000121")
+
+    def test_payout_fee_uses_decimal_rounding_and_wallet_debits_fee_on_top(self):
+        self.assertEqual(calculate_payout_fee_amount_minor(150000), 3000)
+        self.assertEqual(calculate_payout_fee_amount_minor(101), 2)
+
+        user = User.objects.create_user(
+            phone_number="254700000122",
+            password="StrongPass123!",
+            full_name="Fee Sender",
+            account_type="INDIVIDUAL",
+        )
+        payee = user.payees.create(
+            label="Fee Recipient",
+            payee_type="MOBILE",
+            phone_number="254711222334",
+            expense_category="family",
+        )
+        top_up_wallet(user, {"amount_minor": 153000, "simulate": True})
+        batch = PaymentBatch.objects.create(
+            batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+            status=PaymentBatch.Status.PROCESSING,
+            payment_mode=PaymentBatch.PaymentMode.WALLET,
+            user=user,
+            scheduled_for=timezone.localdate(),
+        )
+        PaymentInstruction.objects.create(
+            batch=batch,
+            payee=payee,
+            recipient_name=payee.label,
+            recipient_type=payee.payee_type,
+            destination={"phone_number": payee.phone_number},
+            amount_minor=150000,
+            fee_amount_minor=calculate_payout_fee_amount_minor(150000),
+            category="family",
+        )
+        batch.recalculate_totals()
+        from base.services import _recalculate_batch_fee, settle_batch
+
+        _recalculate_batch_fee(batch)
+        settled = settle_batch(batch, actor=user, simulate_collection=True)
+        wallet = get_or_create_user_account(user)
+        wallet.refresh_from_db()
+        self.assertEqual(settled.total_amount_minor, 150000)
+        self.assertEqual(settled.fee_amount_minor, 3000)
+        self.assertEqual(wallet.available_balance_minor, 0)
+
+    def test_kplc_successful_payout_queues_post_payout_sms_and_email_once(self):
+        user = User.objects.create_user(
+            phone_number="254700000123",
+            password="StrongPass123!",
+            full_name="KPLC Sender",
+            email="kplc-sender@example.com",
+            account_type="INDIVIDUAL",
+            email_notifications_enabled=True,
+            sms_notifications_enabled=True,
+        )
+        payee = user.payees.create(
+            label="KPLC Prepaid",
+            payee_type=Payee.PayeeType.PAYBILL,
+            paybill_number="888880",
+            account_number="37123456789",
+            account_reference="37123456789",
+            expense_category="utilities",
+        )
+        batch = PaymentBatch.objects.create(
+            batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+            status=PaymentBatch.Status.PROCESSING,
+            payment_mode=PaymentBatch.PaymentMode.WALLET,
+            user=user,
+            scheduled_for=timezone.localdate(),
+            total_amount_minor=150000,
+            fee_amount_minor=3000,
+        )
+        instruction = PaymentInstruction.objects.create(
+            batch=batch,
+            payee=payee,
+            recipient_name=payee.label,
+            recipient_type=payee.payee_type,
+            destination={"paybill_number": "888880", "account_number": "37123456789"},
+            amount_minor=150000,
+            fee_amount_minor=3000,
+            category="utilities",
+            external_reference="37123456789",
+        )
+        top_up_wallet(user, {"amount_minor": 153000, "simulate": True})
+        account = get_or_create_user_account(user)
+        ledger_transaction = initiate_payout(
+            account,
+            amount_minor=153000,
+            reference=unique_transaction_reference("POT"),
+            idempotency_key=f"test-kplc-payout:{instruction.id}",
+            description="KPLC payout",
+            metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id), "fee_amount_minor": 3000},
+        )
+        batch.metadata["ledger_transaction_id"] = str(ledger_transaction.id)
+        batch.save(update_fields=["metadata", "updated_at"])
+
+        PaymentService(sandbox=True).initiate_instruction_payout(
+            instruction,
+            transaction_record=ledger_transaction,
+            metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id)},
+        )
+
+        self.assertEqual(
+            OutboxEvent.objects.filter(topic="payment.instruction.kplc_notification", aggregate_id=instruction.id).count(),
+            1,
+        )
+        payout_request = PaymentRequest.objects.get(operation=PaymentRequest.Operation.PAYOUT, request_payload__instruction_id=str(instruction.id))
+        self.assertEqual(payout_request.request_payload["amount_minor"], 150000)
+        self.assertEqual(payout_request.request_payload["amount"], 1500.0)
+        meter_payload = {"data": {"colPrepayment": [{"trnTimestamp": 1710000000000, "tokenNo": "12345678901234567890", "concepts": [{"codConcept": "RESSTEP0", "amount": 1200.0}], "trnAmount": 1500.0, "trnUnits": 12.5, "msno": "37123456789"}]}}
+        with patch("base.providers.service_callbacks.KPLCInterface.get_meter_data", return_value=meter_payload) as get_meter_data:
+            call_command("process_outbox")
+            call_command("process_outbox")
+
+        get_meter_data.assert_called_once_with("37123456789")
+        instruction.refresh_from_db()
+        self.assertEqual(instruction.microservice_response["kplc_notification"]["status"], "NOTIFICATION_QUEUED")
+        events = NotificationEvent.objects.filter(context__instruction_id=str(instruction.id), event_type="PAYMENT_SUCCESS")
+        self.assertEqual(events.count(), 3)
+        self.assertEqual({event.channel for event in events}, {"EMAIL", "SMS", "IN_APP"})
+        self.assertTrue(all("Token:" in event.context["kplc_message"] for event in events))
+        in_app = events.get(channel="IN_APP")
+        self.assertEqual(in_app.status, NotificationEvent.Status.SENT)
+        notification = serialize_in_app_notification(in_app)
+        self.assertEqual(notification["title"], "KPLC payment completed")
+        self.assertIn("KPLC payment was completed", notification["body"])
+
+    def test_non_kplc_successful_payout_does_not_queue_kplc_lookup(self):
+        user = User.objects.create_user(
+            phone_number="254700000124",
+            password="StrongPass123!",
+            full_name="Non KPLC Sender",
+            account_type="INDIVIDUAL",
+        )
+        payee = user.payees.create(
+            label="Water",
+            payee_type=Payee.PayeeType.PAYBILL,
+            paybill_number="123456",
+            account_reference="WATER-1",
+            expense_category="utilities",
+        )
+        batch = PaymentBatch.objects.create(
+            batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+            status=PaymentBatch.Status.PROCESSING,
+            payment_mode=PaymentBatch.PaymentMode.WALLET,
+            user=user,
+            scheduled_for=timezone.localdate(),
+            total_amount_minor=50000,
+        )
+        instruction = PaymentInstruction.objects.create(
+            batch=batch,
+            payee=payee,
+            recipient_name=payee.label,
+            recipient_type=payee.payee_type,
+            destination={"paybill_number": "123456"},
+            amount_minor=50000,
+            category="utilities",
+        )
+        top_up_wallet(user, {"amount_minor": 50000, "simulate": True})
+        account = get_or_create_user_account(user)
+        ledger_transaction = initiate_payout(
+            account,
+            amount_minor=50000,
+            reference=unique_transaction_reference("POT"),
+            idempotency_key=f"test-non-kplc-payout:{instruction.id}",
+            description="Non KPLC payout",
+            metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id)},
+        )
+
+        PaymentService(sandbox=True).initiate_instruction_payout(
+            instruction,
+            transaction_record=ledger_transaction,
+            metadata={"batch_id": str(batch.id), "instruction_id": str(instruction.id)},
+        )
+
+        self.assertFalse(OutboxEvent.objects.filter(topic="payment.instruction.kplc_notification", aggregate_id=instruction.id).exists())
+
+    def test_stk_collection_uses_amount_plus_fee_before_instruction_payout(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000125",
+                "password": "StrongPass123!",
+                "full_name": "STK Fee User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        token = response.json()["token"]
+        payee_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "STK KPLC",
+                "payee_type": "PAYBILL",
+                "paybill_number": "888880",
+                "account_number": "37123456780",
+                "account_reference": "37123456780",
+                "expense_category": "utilities",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+
+        response = self._post(
+            "/api/v1/payments/quick-pay/",
+            {
+                "payee_id": payee_id,
+                "amount_minor": 150000,
+                "payment_mode": "STK",
+                "simulate_collection": False,
+            },
+            token=token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        batch_id = response.json()["batch"]["id"]
+        self.assertEqual(response.json()["batch"]["total_amount_minor"], 150000)
+        self.assertEqual(response.json()["batch"]["fee_amount_minor"], 3000)
+        self.assertEqual(response.json()["batch"]["gross_amount_minor"], 153000)
+
+        with patch("base.payment_microservice_executor._sandbox_enabled", return_value=True):
+            call_command("process_outbox")
+
+        collection_request = PaymentRequest.objects.get(operation=PaymentRequest.Operation.STK_PUSH, request_payload__metadata__batch_id=batch_id)
+        self.assertEqual(collection_request.request_payload["amount_minor"], 153000)
+        self.assertEqual(collection_request.request_payload["amount"], 1530.0)
 
     @override_settings(
         NOTIFY_URL="https://notify.example/api/send",

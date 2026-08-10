@@ -4,7 +4,6 @@ import time
 import uuid
 from datetime import timedelta
 from urllib import error, request
-import requests
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
@@ -72,25 +71,25 @@ class NotificationInterface:
             "X-API-KEY": self.api_key,
         }
         logger.info("Sending POST request to %s", self.base_url)
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(self.base_url, data=data, headers=headers, method="POST")
         try:
-            response = requests.post(
-                self.base_url,
-                json=payload,
-                headers=headers,
-            )
-            logger.info("Response received. Status code: %s", response.status_code)
-            response.raise_for_status()
-            result = response.json()
+            with request.urlopen(req, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8")
+                status_code = getattr(response, "status", None)
+            logger.info("Response received. Status code: %s", status_code)
+            result = json.loads(body or "{}")
             logger.info("Notification sent successfully. Response: %s", result)
             return result
-        except requests.HTTPError:
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
             logger.exception(
                 "HTTP error while sending notification. Status: %s, Body: %s",
-                response.status_code,
-                response.text,
+                exc.code,
+                body,
             )
-            raise NotificationDispatchError(response.text)
-        except requests.RequestException as e:
+            raise NotificationDispatchError(body or str(exc))
+        except (error.URLError, OSError) as e:
             logger.exception("Network error while sending notification.")
             raise NotificationDispatchError(str(e))
         except Exception:
@@ -403,27 +402,41 @@ def _event_view_model(event):
             ("How you will pay", _friendly_value(context.get("payment_mode"), {"WALLET": "QuickBills wallet", "STK": "M-PESA prompt"})),
         ]
     elif event.event_type == "PAYMENT_SUCCESS":
-        title = "Your payments were sent successfully"
-        payout_count = context.get("payout_count")
-        recipient_name = context.get("recipient_name")
-        if payout_count:
-            payment_description = f"{_payment_count(payout_count).lower()} totalling {_money_minor(amount)}"
-        elif recipient_name:
-            payment_description = f"your payment of {_money_minor(amount)} to {recipient_name}"
+        if context.get("kplc_message"):
+            title = _clean_text(context.get("title"), fallback="KPLC payment completed")
+            intro = _clean_text(context.get("intro"), fallback="Your KPLC payment was completed. Your token or meter response is below.")
+            badge = _clean_text(context.get("badge"), fallback="KPLC payment")
+            cta_label = "View payment details"
+            details = [
+                ("Payment reference", context.get("payment_reference") or context.get("batch_id", "")),
+                ("Amount", _money_minor(context.get("amount_minor"))),
+                ("Fee", _money_minor(context.get("fee_amount_minor"))),
+                ("Total charged", _money_minor(context.get("total_amount_minor"))),
+                ("KPLC meter", context.get("kplc_meter_number", "")),
+                ("KPLC response", context.get("kplc_message", "")),
+            ]
         else:
-            payment_description = f"your payment of {_money_minor(amount)}"
-        intro = f"We successfully sent {payment_description}. You can view the payment details in QuickBills."
-        badge = "Payment sent"
-        cta_label = "View payment details"
-        details = [
-            ("Payment reference", context.get("batch_id", "")),
-            ("Amount", _money_minor(amount)),
-            ("Sent by", context.get("sender_name", "")),
-            ("Sender phone", context.get("sender_phone_number", "")),
-            ("Recipient", context.get("recipient_name", "")),
-            ("Recipient phone", context.get("recipient_phone_number", "")),
-            ("Number of recipients", context.get("payout_count", "")),
-        ]
+            title = "Your payments were sent successfully"
+            payout_count = context.get("payout_count")
+            recipient_name = context.get("recipient_name")
+            if payout_count:
+                payment_description = f"{_payment_count(payout_count).lower()} totalling {_money_minor(amount)}"
+            elif recipient_name:
+                payment_description = f"your payment of {_money_minor(amount)} to {recipient_name}"
+            else:
+                payment_description = f"your payment of {_money_minor(amount)}"
+            intro = f"We successfully sent {payment_description}. You can view the payment details in QuickBills."
+            badge = "Payment sent"
+            cta_label = "View payment details"
+            details = [
+                ("Payment reference", context.get("batch_id", "")),
+                ("Amount", _money_minor(amount)),
+                ("Sent by", context.get("sender_name", "")),
+                ("Sender phone", context.get("sender_phone_number", "")),
+                ("Recipient", context.get("recipient_name", "")),
+                ("Recipient phone", context.get("recipient_phone_number", "")),
+                ("Number of recipients", context.get("payout_count", "")),
+            ]
     elif event.event_type == "PAYMENT_FAILURE":
         title = "A payment needs your attention"
         intro = "We could not send one or more of your payments. Open QuickBills to see what happened and try again."

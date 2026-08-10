@@ -6,7 +6,7 @@ import random
 import secrets
 import uuid
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -57,6 +57,58 @@ DEFAULT_TEST_OTP_PHONE = "254700000633"
 LOGIN_OTP_TTL_MINUTES = 10
 LOGIN_OTP_RETRY_AFTER_SECONDS = 60
 TRANSACTION_REF_GENERATOR = TransactionRefGenerator(prefix="RT")
+DEFAULT_EXPENSE_CATEGORY_SLUG = "professional_business_services"
+
+PREDEFINED_EXPENSE_CATEGORIES = [
+    {"slug": "electricity", "name": "Electricity", "description": "Electricity providers and power bills.", "icon": "bolt", "display_order": 10},
+    {"slug": "water", "name": "Water", "description": "Water utilities and county water providers.", "icon": "droplets", "display_order": 20},
+    {"slug": "internet", "name": "Internet", "description": "Home internet, business internet, and fiber providers.", "icon": "wifi", "display_order": 30},
+    {"slug": "mobile_telecommunications", "name": "Mobile / Telecommunications", "description": "Airtime, mobile network, and telecommunications services.", "icon": "smartphone", "display_order": 40},
+    {"slug": "tv_entertainment", "name": "TV / Entertainment", "description": "Pay TV, streaming, and entertainment subscriptions.", "icon": "tv", "display_order": 50},
+    {"slug": "rent_property", "name": "Rent / Property", "description": "Rent, landlords, property managers, and property service payments.", "icon": "home", "display_order": 60},
+    {"slug": "insurance", "name": "Insurance", "description": "Health, motor, life, and general insurance payments.", "icon": "shield", "display_order": 70},
+    {"slug": "banking_loans", "name": "Banking / Loans", "description": "Bank repayments, loans, credit facilities, and financial institutions.", "icon": "landmark", "display_order": 80},
+    {"slug": "education", "name": "School / Education", "description": "School fees, colleges, universities, and education payments.", "icon": "graduation-cap", "display_order": 90},
+    {"slug": "government_taxes", "name": "Government / Taxes", "description": "Government services, taxes, licenses, and public-service payments.", "icon": "building-2", "display_order": 100},
+    {"slug": "security_services", "name": "Security Services", "description": "Home security, business security, and alarm monitoring.", "icon": "lock", "display_order": 110},
+    {"slug": "waste_management", "name": "Waste Management", "description": "Garbage collection, disposal, and environmental services.", "icon": "trash-2", "display_order": 120},
+    {"slug": "healthcare", "name": "Healthcare", "description": "Hospitals, clinics, medical facilities, and medical subscriptions.", "icon": "heart-pulse", "display_order": 130},
+    {"slug": "transport_parking", "name": "Transport / Parking", "description": "Parking, transport services, and fleet-related recurring payments.", "icon": "car", "display_order": 140},
+    {"slug": "professional_business_services", "name": "Professional / Business Services", "description": "Accounting, legal, SaaS, and professional subscriptions.", "icon": "briefcase-business", "display_order": 150},
+]
+
+LEGACY_EXPENSE_CATEGORY_ALIASES = {
+    "general": DEFAULT_EXPENSE_CATEGORY_SLUG,
+    "utilities": "electricity",
+    "utility": "electricity",
+    "power": "electricity",
+    "kplc": "electricity",
+    "rent": "rent_property",
+    "property": "rent_property",
+    "housing": "rent_property",
+    "school": "education",
+    "schools": "education",
+    "mobile": "mobile_telecommunications",
+    "telecommunications": "mobile_telecommunications",
+    "telco": "mobile_telecommunications",
+    "tv": "tv_entertainment",
+    "entertainment": "tv_entertainment",
+    "loans": "banking_loans",
+    "loan": "banking_loans",
+    "banking": "banking_loans",
+    "tax": "government_taxes",
+    "taxes": "government_taxes",
+    "government": "government_taxes",
+    "security": "security_services",
+    "waste": "waste_management",
+    "transport": "transport_parking",
+    "parking": "transport_parking",
+    "business": "professional_business_services",
+    "professional": "professional_business_services",
+    "family": "professional_business_services",
+    "audit": "professional_business_services",
+    "payroll": "professional_business_services",
+}
 
 PAYMENT_BATCH_TRANSITIONS = {
     PaymentBatch.Status.DRAFT: {PaymentBatch.Status.PENDING_APPROVAL},
@@ -1221,15 +1273,50 @@ def _validate_payee(payload):
         raise ValidationError("bank_name, bank_code, and account_number are required for bank payees.")
 
 
+def _category_lookup_key(value):
+    key = slugify((value or "").strip()).replace("-", "_")
+    return key or DEFAULT_EXPENSE_CATEGORY_SLUG
+
+
+def _canonical_category_slug(value):
+    key = _category_lookup_key(value)
+    return LEGACY_EXPENSE_CATEGORY_ALIASES.get(key, key)
+
+
+def seed_predefined_expense_categories():
+    categories = []
+    for definition in PREDEFINED_EXPENSE_CATEGORIES:
+        category, created = ExpenseCategory.objects.get_or_create(
+            slug=definition["slug"],
+            defaults={
+                "name": definition["name"],
+                "description": definition["description"],
+                "category_type": "PAYMENT",
+                "icon": definition["icon"],
+                "display_order": definition["display_order"],
+                "active": True,
+                "is_system_defined": True,
+            },
+        )
+        if not created:
+            for field in ["name", "description", "icon", "display_order"]:
+                setattr(category, field, definition[field])
+            category.category_type = "PAYMENT"
+            category.is_system_defined = True
+            category.save(update_fields=["name", "description", "category_type", "icon", "display_order", "is_system_defined", "updated_at"])
+        categories.append(category)
+    return categories
+
+
 def ensure_expense_category(name):
-    category_name = (name or "general").strip() or "general"
-    category, _ = ExpenseCategory.objects.get_or_create(
-        name=category_name,
-        defaults={"active": True},
+    seed_predefined_expense_categories()
+    slug = _canonical_category_slug(name)
+    category = (
+        ExpenseCategory.objects.filter(slug=slug, active=True).first()
+        or ExpenseCategory.objects.filter(name__iexact=(name or "").strip(), active=True).first()
     )
-    if not category.active:
-        category.active = True
-        category.save(update_fields=["active", "updated_at"])
+    if not category:
+        raise ValidationError("Select a valid predefined payment category.")
     return category
 
 
@@ -1249,8 +1336,7 @@ def create_payee(user, payload):
         )
 
     phone_number = normalize_phone_number(resolved_payload.get("phone_number"))
-    expense_category = (resolved_payload.get("expense_category") or "general").strip()
-    ensure_expense_category(expense_category)
+    expense_category = ensure_expense_category(resolved_payload.get("expense_category")).slug
     payee = Payee.objects.create(
         user=None if organization else user,
         organization=organization,
@@ -1333,7 +1419,7 @@ def update_payee(user, payee_id, payload):
             if field_name == "phone_number":
                 value = normalize_phone_number(value)
             if field_name == "expense_category":
-                ensure_expense_category(value)
+                value = ensure_expense_category(value).slug
             if field_name == "active":
                 value = bool(value)
             setattr(payee, field_name, value)
@@ -1572,6 +1658,7 @@ def list_payee_presets(filters=None):
 
 def list_expense_categories(filters=None):
     filters = filters or {}
+    seed_predefined_expense_categories()
     queryset = ExpenseCategory.objects.all()
     active = filters.get("active")
     if active is None:
@@ -1580,8 +1667,8 @@ def list_expense_categories(filters=None):
         queryset = queryset.filter(active=bool(active))
     if filters.get("q"):
         term = filters["q"].strip()
-        queryset = queryset.filter(Q(name__icontains=term) | Q(description__icontains=term))
-    return queryset.order_by("name", "created_at")
+        queryset = queryset.filter(Q(name__icontains=term) | Q(slug__icontains=term) | Q(description__icontains=term))
+    return queryset.order_by("display_order", "name", "created_at")
 
 
 def list_banks(filters=None):
@@ -1610,7 +1697,7 @@ def list_schedules(user, organization_id=None, filters=None):
     if filters.get("active") is not None:
         queryset = queryset.filter(active=bool(filters["active"]))
     if filters.get("category"):
-        queryset = queryset.filter(payee__expense_category=filters["category"].strip())
+        queryset = queryset.filter(payee__expense_category=_canonical_category_slug(filters["category"]))
     if filters.get("q"):
         term = filters["q"].strip()
         queryset = queryset.filter(Q(payee__label__icontains=term) | Q(payee__account_reference__icontains=term))
@@ -1819,8 +1906,22 @@ def _build_destination_from_payee(payee):
     }
 
 
+def calculate_payout_fee_amount_minor(amount_minor):
+    amount = Decimal(int(amount_minor or 0))
+    fee = (amount * Decimal(SERVICE_FEE_BPS) / Decimal(10000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    fee_minor = max(0, int(fee))
+    logger.info(
+        "payment.fee.calculated amount_minor=%s fee_bps=%s fee_amount_minor=%s total_amount_minor=%s",
+        int(amount_minor or 0),
+        SERVICE_FEE_BPS,
+        fee_minor,
+        int(amount_minor or 0) + fee_minor,
+    )
+    return fee_minor
+
+
 def _calculate_instruction_fee(amount_minor):
-    return max(0, int(amount_minor) * SERVICE_FEE_BPS // 10000)
+    return calculate_payout_fee_amount_minor(amount_minor)
 
 
 def _batch_required_total(batch):
@@ -2209,7 +2310,7 @@ def _create_instruction_from_row(batch, row):
         },
         amount_minor=amount_minor,
         fee_amount_minor=_calculate_instruction_fee(amount_minor),
-        category=(row.get("category") or "general").strip(),
+        category=ensure_expense_category(row.get("category")).slug,
         external_reference=(row.get("external_reference") or "").strip(),
     )
 
@@ -2648,6 +2749,183 @@ def finalize_batch_from_instructions(batch):
     return batch.status
 
 
+def _instruction_is_kplc(instruction):
+    payee = instruction.payee
+    return bool(payee and str(payee.paybill_number or "").strip() == "888880")
+
+
+def _queue_kplc_payout_notification(instruction):
+    if not _instruction_is_kplc(instruction):
+        return None
+    meter_number = str(instruction.payee.account_number or "").strip()
+    if not meter_number:
+        logger.warning("kplc.payout_notification.skipped_missing_meter instruction_id=%s", instruction.id)
+        return None
+    existing = OutboxEvent.objects.filter(
+        topic="payment.instruction.kplc_notification",
+        aggregate_type="payment_instruction",
+        aggregate_id=instruction.id,
+    ).first()
+    if existing:
+        logger.info(
+            "kplc.payout_notification.already_queued instruction_id=%s event_id=%s status=%s",
+            instruction.id,
+            existing.id,
+            existing.status,
+        )
+        return existing
+    event = OutboxEvent.objects.create(
+        topic="payment.instruction.kplc_notification",
+        aggregate_type="payment_instruction",
+        aggregate_id=instruction.id,
+        payload={
+            "batch_id": str(instruction.batch_id),
+            "meter_number": meter_number,
+            "amount_minor": instruction.amount_minor,
+            "fee_amount_minor": instruction.fee_amount_minor,
+            "microservice_request_id": instruction.microservice_request_id,
+        },
+    )
+    logger.info(
+        "kplc.payout_notification.queued instruction_id=%s event_id=%s meter_number=%s amount_minor=%s fee_amount_minor=%s",
+        instruction.id,
+        event.id,
+        meter_number,
+        instruction.amount_minor,
+        instruction.fee_amount_minor,
+    )
+    return event
+
+
+def _notification_context_for_kplc(instruction, message):
+    batch = instruction.batch
+    user = _batch_notification_user(batch)
+    meter_number = str(instruction.payee.account_number or "").strip() if instruction.payee_id else ""
+    reference = instruction.microservice_request_id or instruction.external_reference or str(instruction.id)
+    return user, {
+        "title": "KPLC payment completed",
+        "intro": "Your KPLC payment was completed. Your token or meter response is below.",
+        "badge": "KPLC payment",
+        "batch_id": str(batch.id),
+        "instruction_id": str(instruction.id),
+        "amount_minor": instruction.amount_minor,
+        "fee_amount_minor": instruction.fee_amount_minor,
+        "total_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
+        "recipient_name": instruction.recipient_name,
+        "recipient_type": instruction.recipient_type,
+        "kplc_meter_number": meter_number,
+        "kplc_message": message,
+        "message": (
+            "Payment completed.\n\n"
+            f"Amount: KES {instruction.amount_minor / 100:,.2f}\n"
+            f"Fee: KES {instruction.fee_amount_minor / 100:,.2f}\n"
+            f"KPLC Meter: {meter_number}\n"
+            f"Reference: {reference}\n\n"
+            f"KPLC Response:\n{message}"
+        ),
+        "payment_reference": reference,
+        "sender_name": user.full_name if user else "",
+        "sender_phone_number": user.phone_number if user else "",
+    }
+
+
+def _queue_kplc_notification_event(user, channel, context):
+    from notifications.models import NotificationEvent, NotificationTemplate
+
+    if channel == "IN_APP":
+        recipients = []
+    elif channel == "SMS":
+        recipients = [str(user.phone_number or "").strip()] if user and user.phone_number else []
+    else:
+        recipients = [str(user.email or "").strip()] if user and user.email else []
+    recipients = [recipient for recipient in recipients if recipient]
+    if channel != "IN_APP" and not recipients:
+        return None
+    template = NotificationTemplate.objects.filter(event_type="PAYMENT_SUCCESS", channel=channel, active=True).first()
+    if not template and channel != "IN_APP":
+        logger.warning("kplc.notification.template_missing channel=%s instruction_id=%s", channel, context.get("instruction_id"))
+        return None
+    unique_identifier = f"kplc-{context['instruction_id']}-{channel.lower()}"
+    event = NotificationEvent.objects.filter(unique_identifier=unique_identifier).first()
+    if event:
+        logger.info(
+            "kplc.notification.already_queued instruction_id=%s channel=%s event_id=%s status=%s",
+            context.get("instruction_id"),
+            channel,
+            event.id,
+            event.status,
+        )
+        return event
+    event = NotificationEvent.objects.create(
+        user=user,
+        template=template,
+        channel=channel,
+        event_type="PAYMENT_SUCCESS",
+        status=NotificationEvent.Status.SENT if channel == "IN_APP" else NotificationEvent.Status.PENDING,
+        scheduled_for=timezone.now(),
+        sent_at=timezone.now() if channel == "IN_APP" else None,
+        unique_identifier=unique_identifier,
+        recipients=recipients,
+        context=context,
+    )
+    logger.info(
+        "kplc.notification.queued instruction_id=%s channel=%s event_id=%s recipient_count=%s",
+        context.get("instruction_id"),
+        channel,
+        event.id,
+        len(recipients),
+    )
+    return event
+
+
+def process_kplc_payout_notification(instruction_id):
+    from base.providers.service_callbacks import KPLCInterface, kplc_sms_message
+
+    instruction = PaymentInstruction.objects.select_related("batch", "batch__user", "batch__approved_by", "batch__submitted_by", "payee").get(id=instruction_id)
+    if not _instruction_is_kplc(instruction):
+        return {"status": "skipped", "reason": "not_kplc"}
+    response = dict(instruction.microservice_response or {})
+    current = response.get("kplc_notification") or {}
+    if current.get("status") == "NOTIFICATION_QUEUED":
+        logger.info("kplc.payout_notification.already_processed instruction_id=%s", instruction.id)
+        return current
+    meter_number = str(instruction.payee.account_number or "").strip()
+    if not meter_number:
+        raise ValidationError("KPLC meter number is required for post-payout processing.")
+    try:
+        logger.info("kplc.lookup.start instruction_id=%s meter_number=%s", instruction.id, meter_number)
+        result = KPLCInterface().get_meter_data(meter_number)
+        message = kplc_sms_message(result)
+        logger.info("kplc.message.generated instruction_id=%s meter_number=%s", instruction.id, meter_number)
+    except Exception as exc:
+        response["kplc_notification"] = {
+            "status": "FAILED",
+            "error": str(exc)[:255],
+            "meter_number": meter_number,
+            "failed_at": timezone.now().isoformat(),
+        }
+        instruction.microservice_response = response
+        instruction.save(update_fields=["microservice_response", "updated_at"])
+        logger.exception("kplc.lookup.failed instruction_id=%s meter_number=%s", instruction.id, meter_number)
+        raise
+    user, context = _notification_context_for_kplc(instruction, message)
+    notification_events = []
+    for channel in ("SMS", "EMAIL", "IN_APP"):
+        event = _queue_kplc_notification_event(user, channel, context)
+        if event:
+            notification_events.append(str(event.id))
+    response["kplc_notification"] = {
+        "status": "NOTIFICATION_QUEUED",
+        "meter_number": meter_number,
+        "message": message,
+        "notification_event_ids": notification_events,
+        "processed_at": timezone.now().isoformat(),
+    }
+    instruction.microservice_response = response
+    instruction.save(update_fields=["microservice_response", "updated_at"])
+    return response["kplc_notification"]
+
+
 def record_instruction_success(instruction, microservice_response, microservice_request_id=""):
     from_status = instruction.status
     instruction.status = PaymentInstruction.Status.SUCCEEDED
@@ -2667,6 +2945,8 @@ def record_instruction_success(instruction, microservice_response, microservice_
         payload={"microservice_response": microservice_response or {}},
     )
     finalize_batch_from_instructions(instruction.batch)
+    if from_status != PaymentInstruction.Status.SUCCEEDED:
+        _queue_kplc_payout_notification(instruction)
     return instruction
 
 
