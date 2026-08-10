@@ -62,7 +62,9 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="expensecategory",
             name="slug",
-            field=models.SlugField(blank=True, max_length=64),
+            # Avoid creating SlugField's implicit PostgreSQL pattern-ops index
+            # before this migration makes the populated column unique below.
+            field=models.CharField(blank=True, max_length=64),
         ),
         migrations.AddField(
             model_name="expensecategory",
