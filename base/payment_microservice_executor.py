@@ -18,19 +18,30 @@ def _sandbox_enabled():
     return not bool(getattr(settings, "PAYMENT_MICROSERVICE_URL", ""))
 
 
-def request_collection_for_batch(batch_id):
-    batch = PaymentBatch.objects.select_related("user").get(id=batch_id)
-    if not batch.user_id:
-        raise PaymentDispatchError("STK collection requires a user-backed batch.")
-    amount_minor = batch.total_amount_minor + batch.fee_amount_minor
+def request_collection_for_batch(batch_id, payload=None):
+    payload = payload or {}
+    batch = PaymentBatch.objects.select_related("user", "organization", "approved_by", "submitted_by").get(id=batch_id)
+    actor = batch.user or batch.approved_by or batch.submitted_by
+    if not actor:
+        raise PaymentDispatchError("STK collection requires a user, submitter, or approver phone number.")
+    amount_minor = int(payload.get("amount_minor") or batch.total_amount_minor + batch.fee_amount_minor)
     if amount_minor <= 0:
         raise PaymentDispatchError("STK collection amount must be greater than zero.")
-    account = get_or_create_user_account(batch.user)
+    if batch.organization_id:
+        from ledger.services import get_or_create_organization_account
+
+        account = get_or_create_organization_account(batch.organization)
+    else:
+        account = get_or_create_user_account(actor)
     payment_request = PaymentService(sandbox=_sandbox_enabled()).initiate_stk_push(
         account,
         amount_minor=amount_minor,
-        phone_number=batch.user.phone_number,
-        metadata={"batch_id": str(batch.id), "purpose": "batch_collection"},
+        phone_number=payload.get("phone_number") or actor.phone_number,
+        metadata={
+            "batch_id": str(batch.id),
+            "purpose": "batch_collection",
+            "funding_reason": payload.get("reason") or "wallet_funding_before_payout",
+        },
     )
     batch.metadata["collection_request_id"] = payment_request.request_id
     batch.metadata["collection_originator_ref"] = payment_request.originator_ref
@@ -79,7 +90,7 @@ def process_outbox_event(event):
     if event.topic == "collection.stk.requested":
         if event.aggregate_type != "payment_batch":
             raise PaymentDispatchError(f"Unsupported collection aggregate type {event.aggregate_type}.")
-        return request_collection_for_batch(event.aggregate_id)
+        return request_collection_for_batch(event.aggregate_id, event.payload)
     if event.topic == "payment.instruction.dispatch":
         return dispatch_instruction(event.aggregate_id)
     if event.topic in {

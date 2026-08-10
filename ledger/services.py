@@ -52,6 +52,66 @@ class InsufficientLedgerFunds(LedgerError):
         self.available_balance_minor = available_balance_minor
 
 
+class PesaWayEventConfig:
+    @classmethod
+    def system_slug(cls):
+        return getattr(settings, "PESAWAY_SYSTEM_SLUG", "") or "qb"
+
+    @classmethod
+    def collection_event_slug(cls):
+        return getattr(settings, "PESAWAY_COLLECTION_EVENT_SLUG", "") or "load-wallet"
+
+    @classmethod
+    def b2c_event_slug(cls):
+        return getattr(settings, "PESAWAY_B2C_EVENT_SLUG", "") or "b2c"
+
+    @classmethod
+    def b2b_event_slug(cls):
+        return getattr(settings, "PESAWAY_B2B_EVENT_SLUG", "") or "b2b"
+
+    @classmethod
+    def bank_event_slug(cls):
+        return getattr(settings, "PESAWAY_BANK_EVENT_SLUG", "") or "bank-transfer"
+
+
+class PesaWayPayoutRouter:
+    def __init__(self, destination, *, mobile_channel_validator):
+        self.destination = destination or {}
+        self.mobile_channel_validator = mobile_channel_validator
+
+    def route(self):
+        destination_type = str(self.destination.get("type") or "").upper()
+        reason = self.destination.get("reason") or "QuickBills payout"
+        if self.destination.get("phone_number") or destination_type in {"MPESA", "MOBILE", "B2C"}:
+            phone_number = str(self.destination.get("phone_number") or "").strip()
+            if not phone_number:
+                raise LedgerError("PesaWay B2C payout requires provider_payload.phone_number.")
+            return PesaWayEventConfig.b2c_event_slug(), {
+                "phone_number": phone_number,
+                "channel": self.mobile_channel_validator(self.destination.get("channel")),
+                "reason": reason,
+            }
+        if self.destination.get("paybill_number"):
+            return PesaWayEventConfig.b2b_event_slug(), {
+                "account_number": str(self.destination.get("paybill_number") or "").strip(),
+                "channel": "MPESA Paybill",
+                "reason": reason,
+            }
+        if self.destination.get("till_number"):
+            return PesaWayEventConfig.b2b_event_slug(), {
+                "account_number": str(self.destination.get("till_number") or "").strip(),
+                "channel": "MPESA Till",
+                "reason": reason,
+            }
+        if self.destination.get("account_number") and self.destination.get("bank_name"):
+            return PesaWayEventConfig.bank_event_slug(), {
+                "account_number": str(self.destination.get("account_number") or "").strip(),
+                "bank_name": str(self.destination.get("bank_name") or "").strip(),
+                "reason": reason,
+            }
+        raise LedgerError("PesaWay payout requires a mobile, paybill, till, or bank destination.")
+
+
 ACTIVE = "Active"
 COMPLETED = "Completed"
 FAILED = "Failed"
@@ -904,13 +964,9 @@ class PaymentService:
         raise LedgerError(f"Lipasync does not support payment operation {operation}.")
 
     def _pesaway_initiate_request(self, tx, operation, extra_payload, *, originator_ref):
-        system_slug = getattr(settings, "PESAWAY_SYSTEM_SLUG", "")
-        if not system_slug:
-            raise LedgerError("PESAWAY_SYSTEM_SLUG is not configured.")
+        system_slug = PesaWayEventConfig.system_slug()
         if operation == PaymentRequest.Operation.STK_PUSH:
-            event_slug = getattr(settings, "PESAWAY_COLLECTION_EVENT_SLUG", "")
-            if not event_slug:
-                raise LedgerError("PESAWAY_COLLECTION_EVENT_SLUG is not configured.")
+            event_slug = PesaWayEventConfig.collection_event_slug()
             phone_number = str(extra_payload.get("phone_number") or "").strip()
             if not phone_number:
                 raise LedgerError("PesaWay collection requires provider_payload.phone_number.")
@@ -941,48 +997,10 @@ class PaymentService:
         raise LedgerError(f"PesaWay does not support payment operation {operation}.")
 
     def _pesaway_outbound_payload(self, destination):
-        destination_type = str(destination.get("type") or "").upper()
-        reason = destination.get("reason") or "QuickBills payout"
-        if destination.get("phone_number") or destination_type in {"MPESA", "MOBILE", "B2C"}:
-            event_slug = getattr(settings, "PESAWAY_B2C_EVENT_SLUG", "")
-            if not event_slug:
-                raise LedgerError("PESAWAY_B2C_EVENT_SLUG is not configured.")
-            phone_number = str(destination.get("phone_number") or "").strip()
-            if not phone_number:
-                raise LedgerError("PesaWay B2C payout requires provider_payload.phone_number.")
-            return event_slug, {
-                "phone_number": phone_number,
-                "channel": self._pesaway_mobile_channel(destination.get("channel")),
-                "reason": reason,
-            }
-        if destination.get("paybill_number"):
-            event_slug = getattr(settings, "PESAWAY_B2B_EVENT_SLUG", "")
-            if not event_slug:
-                raise LedgerError("PESAWAY_B2B_EVENT_SLUG is not configured.")
-            return event_slug, {
-                "account_number": str(destination.get("paybill_number") or "").strip(),
-                "channel": "MPESA Paybill",
-                "reason": reason,
-            }
-        if destination.get("till_number"):
-            event_slug = getattr(settings, "PESAWAY_B2B_EVENT_SLUG", "")
-            if not event_slug:
-                raise LedgerError("PESAWAY_B2B_EVENT_SLUG is not configured.")
-            return event_slug, {
-                "account_number": str(destination.get("till_number") or "").strip(),
-                "channel": "MPESA Till",
-                "reason": reason,
-            }
-        if destination.get("account_number") and destination.get("bank_name"):
-            event_slug = getattr(settings, "PESAWAY_BANK_EVENT_SLUG", "")
-            if not event_slug:
-                raise LedgerError("PESAWAY_BANK_EVENT_SLUG is not configured.")
-            return event_slug, {
-                "account_number": str(destination.get("account_number") or "").strip(),
-                "bank_name": str(destination.get("bank_name") or "").strip(),
-                "reason": reason,
-            }
-        raise LedgerError("PesaWay payout requires a mobile, paybill, till, or bank destination.")
+        return PesaWayPayoutRouter(
+            destination,
+            mobile_channel_validator=self._pesaway_mobile_channel,
+        ).route()
 
     def _pesaway_mobile_channel(self, channel):
         channel = str(channel or "MPESA").strip()

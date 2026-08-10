@@ -405,6 +405,7 @@ def _serialize_ledger_entry(entry):
         "wallet_id": str(wallet.id),
         "wallet_type": wallet.wallet_type,
         "entry_type": entry_type,
+        "direction": entry.direction,
         "amount_minor": amount_minor,
         "base_amount_minor": base_amount_minor,
         "fee_amount_minor": fee_amount_minor,
@@ -1023,6 +1024,8 @@ def wallet_ledger_view(request):
             {
                 "wallet_type": request.GET.get("wallet_type"),
                 "entry_type": request.GET.get("entry_type"),
+                "direction": request.GET.get("direction"),
+                "status": request.GET.get("status"),
             },
         )
     except DomainError as exc:
@@ -1253,6 +1256,7 @@ def transaction_statement_pdf_view(request):
                 "date_from": request.GET.get("date_from"),
                 "date_to": request.GET.get("date_to"),
                 "status": request.GET.get("status"),
+                "transaction_kind": request.GET.get("transaction_kind"),
                 "category": request.GET.get("category"),
                 "recipient_type": request.GET.get("recipient_type"),
                 "q": request.GET.get("q"),
@@ -1294,6 +1298,7 @@ def transaction_summary_view(request):
                 "status": request.GET.get("status"),
                 "category": request.GET.get("category"),
                 "recipient_type": request.GET.get("recipient_type"),
+                "transaction_kind": request.GET.get("transaction_kind") or request.GET.get("kind"),
                 "q": request.GET.get("q"),
             },
         )
