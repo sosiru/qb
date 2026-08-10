@@ -2737,6 +2737,11 @@ def _quick_pay_recipient_rows(payload):
     rows = []
     recipients = payload.get("recipients")
     if isinstance(recipients, list):
+        if len(recipients) > 1 and any(
+            not isinstance(recipient, dict) or not recipient.get("amount_minor")
+            for recipient in recipients
+        ):
+            raise ValidationError("Enter an amount for every selected bill.")
         for recipient in recipients:
             if not isinstance(recipient, dict):
                 continue
@@ -2748,6 +2753,8 @@ def _quick_pay_recipient_rows(payload):
                 }
             )
     elif isinstance(payload.get("payee_ids"), list):
+        if len(payload["payee_ids"]) > 1:
+            raise ValidationError("Use recipients with amount_minor for multiple bill payments.")
         rows = [
             {
                 "payee_id": payee_id,
@@ -2769,6 +2776,9 @@ def _quick_pay_recipient_rows(payload):
         raise ValidationError("At least one payee is required.")
     if any(row["amount_minor"] <= 0 for row in rows):
         raise ValidationError("amount_minor must be greater than 0 for every recipient.")
+    payee_ids = [str(row["payee_id"]) for row in rows]
+    if len(payee_ids) != len(set(payee_ids)):
+        raise ValidationError("Select each bill only once.")
     return rows
 
 

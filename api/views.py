@@ -307,10 +307,30 @@ def _serialize_schedule(schedule):
 
 
 def _serialize_batch(batch):
+    metadata = batch.metadata or {}
+    collection_status = metadata.get("collection_status") or ("NOT_REQUIRED" if batch.payment_mode == "WALLET" else "CREATED")
+    pending_instruction_count = batch.instructions.filter(status="PENDING").count()
+    failed_instruction_count = batch.instructions.filter(status="FAILED").count()
+    succeeded_instruction_count = batch.instructions.filter(status="SUCCEEDED").count()
+    if batch.status == "SUCCEEDED":
+        lifecycle_status = "COMPLETED"
+    elif batch.status == "FAILED" and collection_status in {"FAILED", "CANCELLED", "TIMEOUT"}:
+        lifecycle_status = f"COLLECTION_{collection_status}"
+    elif batch.status in {"FAILED", "PARTIAL"}:
+        lifecycle_status = "DISBURSEMENT_FAILED"
+    elif collection_status == "SUCCEEDED" and pending_instruction_count:
+        lifecycle_status = "DISBURSEMENT_PROCESSING"
+    elif collection_status == "PROCESSING":
+        lifecycle_status = "PAYMENT_PENDING"
+    elif batch.status == "PENDING_APPROVAL":
+        lifecycle_status = "PENDING_APPROVAL"
+    else:
+        lifecycle_status = batch.status
     return {
         "id": str(batch.id),
         "batch_kind": batch.batch_kind,
         "status": batch.status,
+        "lifecycle_status": lifecycle_status,
         "payment_mode": batch.payment_mode,
         "scheduled_for": batch.scheduled_for.isoformat(),
         "description": batch.description,
@@ -321,6 +341,22 @@ def _serialize_batch(batch):
         "organization_id": str(batch.organization_id) if batch.organization_id else None,
         "user_id": str(batch.user_id) if batch.user_id else None,
         "instruction_count": batch.instructions.count(),
+        "pending_instruction_count": pending_instruction_count,
+        "succeeded_instruction_count": succeeded_instruction_count,
+        "failed_instruction_count": failed_instruction_count,
+        "bill_total_minor": batch.total_amount_minor,
+        "total_charged_minor": batch.total_amount_minor + batch.fee_amount_minor,
+        "collection_status": collection_status,
+        "collection_amount_minor": metadata.get("collection_amount_minor"),
+        "collection_request_id": metadata.get("collection_request_id"),
+        "collection_originator_ref": metadata.get("collection_originator_ref"),
+        "disbursement_status": (
+            "SUCCEEDED" if batch.status == "SUCCEEDED"
+            else "FAILED" if batch.status == "FAILED"
+            else "PARTIAL" if batch.status == "PARTIAL"
+            else "PROCESSING" if pending_instruction_count and batch.status == "PROCESSING"
+            else "PENDING"
+        ),
         "submitted_by_name": batch.submitted_by.full_name if batch.submitted_by_id else None,
         "approved_by_name": batch.approved_by.full_name if batch.approved_by_id else None,
         "submitted_at": batch.submitted_at.isoformat() if batch.submitted_at else None,
