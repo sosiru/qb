@@ -193,7 +193,7 @@ def _unique_account_number():
 
 
 def _transaction_reference(prefix="TRX"):
-    return f"{prefix}-{secrets.token_hex(6).upper()}"
+    return f"{prefix}-QB-{timezone.now():%Y%m%d}-{secrets.token_hex(4).upper()}"
 
 
 def unique_transaction_reference(prefix="TRX"):
