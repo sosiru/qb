@@ -53,7 +53,7 @@ from .utils import TransactionRefGenerator
 
 SERVICE_FEE_BPS = 200
 logger = logging.getLogger(__name__)
-DEFAULT_TEST_OTP_PHONE = "254710956633"
+DEFAULT_TEST_OTP_PHONE = "254700000633"
 LOGIN_OTP_TTL_MINUTES = 10
 LOGIN_OTP_RETRY_AFTER_SECONDS = 60
 TRANSACTION_REF_GENERATOR = TransactionRefGenerator(prefix="RT")

@@ -146,7 +146,7 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/register/",
             {
-                "phone_number": "254710956633",
+                "phone_number": "254700000633",
                 "password": "StrongPass123!",
                 "full_name": "OTP User",
                 "email": "otp-user@example.com",
@@ -158,13 +158,13 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/login/",
             {
-                "phone_number": "0710956633",
+                "phone_number": "0700000633",
                 "password": "StrongPass123!",
             },
         )
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.json()["otp_required"])
-        self.assertEqual(response.json()["phone_number"], "254710956633")
+        self.assertEqual(response.json()["phone_number"], "254700000633")
         dev_otp = response.json()["dev_otp"]
         self.assertRegex(dev_otp, r"^\d{5}$")
         otp_events = NotificationEvent.objects.filter(event_type="LOGIN_OTP")
@@ -175,7 +175,7 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/login/",
             {
-                "phone_number": "254710956633",
+                "phone_number": "254700000633",
                 "password": "StrongPass123!",
                 "otp": "654321",
             },
@@ -185,14 +185,14 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/login/",
             {
-                "phone_number": "254710956633",
+                "phone_number": "254700000633",
                 "password": "StrongPass123!",
                 "otp": dev_otp,
             },
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("token", response.json())
-        self.assertEqual(response.json()["user"]["phone_number"], "254710956633")
+        self.assertEqual(response.json()["user"]["phone_number"], "254700000633")
 
     @override_settings(DEBUG=True)
     def test_login_otp_queues_sms_and_email_even_when_preferences_are_disabled(self):
