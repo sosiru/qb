@@ -70,7 +70,7 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 }
 ```
 
-QuickBills stores `request_id` and keeps the related transaction or batch in `PROCESSING` until a callback or status response returns a final `success` value. If a request stays in `PROCESSING` for more than 3 minutes, QuickBills fails it locally with a timeout failure reason.
+QuickBills stores `request_id` and keeps the related transaction or batch in `PROCESSING` until final confirmation. Live payout initiation responses never complete a payout. After 60 seconds, QuickBills queries the outbound transfer status; a terminal `SUCCESS` or `FAILED` result is applied just like a callback. Pending results remain open, and requests without a final callback or status fail after 300 seconds.
 
 ## Initiate Payout
 
@@ -161,7 +161,15 @@ curl -X POST "$PAYMENT_MICROSERVICE_URL/transactions/initiate/" \
 
 ## Query Transaction Status
 
-QuickBills calls this for payment requests that remain in `PROCESSING`. Requests that are still not final after 3 minutes are failed locally.
+QuickBills calls a supported status endpoint after a request has remained in `PROCESSING` for 60 seconds. Requests that are still not final after 300 seconds are failed locally.
+
+For PesaWay Core outbound transfers, QuickBills uses the `outbound_transfer_id` returned during initiation:
+
+```text
+GET /api/v1/core/outbound-transfers/<OUTBOUND_TRANSFER_ID>/status/
+```
+
+`SUCCESS` completes the payout, `FAILED` fails it, and `QUEUED`, `PROCESSING`, or `PENDING` leave it open.
 
 ### Request
 
@@ -219,7 +227,7 @@ Failure responses should include at least one human-readable reason field. Quick
 
 ## Processing Timeout
 
-QuickBills fails any payment request that remains in `PROCESSING` for more than 180 seconds.
+QuickBills queries supported status endpoints after 60 seconds and fails any payment request that remains in `PROCESSING` for more than 300 seconds.
 
 Run the reconciliation command periodically, for example every minute:
 
@@ -230,13 +238,13 @@ python manage.py reconcile_processing_payments
 The local timeout reason is:
 
 ```text
-Payment request timed out after 180 seconds without a final microservice response.
+Payment request timed out after 300 seconds without a final callback or status response.
 ```
 
 If the status check itself fails after the timeout, the local reason is:
 
 ```text
-Payment status check failed after 180 seconds: <microservice error>
+Payment status check failed after 300 seconds: <microservice error>
 ```
 
 Timeout failure reasons are written to:
@@ -365,9 +373,9 @@ QuickBills records non-2xx responses as dispatch failures, including the respons
 
 ## Implementation Notes
 
-- Return quickly from `/transactions/initiate/`; final settlement should arrive via webhook or status query.
+- Return quickly from `/transactions/initiate/`; final payout settlement may arrive via webhook or the outbound status endpoint.
 - Echo `originator_ref` in every response.
-- A final callback or status response must include `success`.
+- A final payout callback must include `success`; status responses must include a terminal `data.status` before QuickBills applies them.
 - Use `success: true` for completed payments and `success: false` for failed payments.
 - Do not return `success: false` for pending transactions; omit `success` and return `status: "PROCESSING"` instead.
-- Do not leave transactions processing beyond 3 minutes. Send a final callback or return a final status with a clear `failure_reason`, `message`, or `error`.
+- Send a final callback for every payout. QuickBills starts status reconciliation after 60 seconds and fails requests that have no final result after 300 seconds.

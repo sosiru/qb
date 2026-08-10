@@ -4,15 +4,23 @@ from ledger.services import PaymentService
 
 
 class Command(BaseCommand):
-    help = "Fail payment requests stuck in PROCESSING past the timeout."
+    help = "Query payment status after one minute and fail requests still pending after five minutes."
 
     def add_arguments(self, parser):
-        parser.add_argument("--older-than-seconds", type=int, default=180)
+        parser.add_argument("--query-after-seconds", type=int, default=60)
+        parser.add_argument("--timeout-seconds", type=int, default=300)
         parser.add_argument("--limit", type=int, default=50)
         parser.add_argument(
             "--query-status",
             action="store_true",
-            help="Query the payment microservice before failing timed-out requests.",
+            default=True,
+            help="Query supported payment status endpoints (enabled by default).",
+        )
+        parser.add_argument(
+            "--no-query-status",
+            action="store_false",
+            dest="query_status",
+            help="Disable status queries and rely on callbacks until the timeout.",
         )
         sandbox_group = parser.add_mutually_exclusive_group()
         sandbox_group.add_argument("--sandbox", action="store_true", help="Use sandbox mode for this run.")
@@ -26,7 +34,8 @@ class Command(BaseCommand):
             sandbox = False
 
         processed = PaymentService(sandbox=sandbox).retry_stale_processing(
-            older_than_seconds=options["older_than_seconds"],
+            query_after_seconds=options["query_after_seconds"],
+            timeout_seconds=options["timeout_seconds"],
             limit=options["limit"],
             query_status=options["query_status"],
         )

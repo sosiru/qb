@@ -1,9 +1,8 @@
-import json
 import logging
 import secrets
 import time
 from decimal import Decimal
-from urllib import error, request
+
 import requests
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -517,8 +516,9 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
 
 
 class PaymentService:
-    PROCESSING_TIMEOUT_SECONDS = 180
-    LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "SETTLED", "SUCCESS"}
+    STATUS_QUERY_AFTER_SECONDS = 60
+    PROCESSING_TIMEOUT_SECONDS = 300
+    LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "COMPLETED", "SETTLED", "SUCCESS"}
     LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED", "MANUAL_REVIEW"}
     LIPASYNC_PENDING_STATUSES = {
         "INITIATED",
@@ -677,7 +677,9 @@ class PaymentService:
         payment_request.response_payload = response_payload
         payment_request.request_id = normalized_payload.get("request_id") or ""
         payment_request.save(update_fields=["response_payload", "request_id", "updated_at"])
-        if "success" in normalized_payload:
+        if "success" in normalized_payload and (
+            operation != PaymentRequest.Operation.PAYOUT or normalized_payload["success"] is False
+        ):
             self.handle_webhook({**response_payload, **normalized_payload})
             payment_request.refresh_from_db()
         return payment_request
@@ -689,7 +691,9 @@ class PaymentService:
             payment_request.response_payload = response_payload
             payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
             normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
-            if "success" in normalized_payload:
+            if normalized_payload.get("status") in (
+                self.LIPASYNC_SUCCESS_STATUSES | self.LIPASYNC_FAILURE_STATUSES
+            ):
                 self.handle_webhook({**response_payload, **normalized_payload})
             return response_payload
         payload = {"originator_ref": payment_request.originator_ref, "request_id": payment_request.request_id}
@@ -698,7 +702,9 @@ class PaymentService:
         payment_request.response_payload = response_payload
         payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
         normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
-        if "success" in normalized_payload:
+        if normalized_payload.get("status") in (
+            self.LIPASYNC_SUCCESS_STATUSES | self.LIPASYNC_FAILURE_STATUSES
+        ):
             self.handle_webhook({**response_payload, **normalized_payload})
         return response_payload
 
@@ -712,7 +718,10 @@ class PaymentService:
         lookup = {"originator_ref": originator_ref} if originator_ref else {"request_id": request_id}
         payment_request = PaymentRequest.objects.select_for_update().select_related("transaction").get(**lookup)
         tx = payment_request.transaction
-        payload = {**payload, **self._normalize_microservice_payload(payload, payment_request=payment_request)}
+        normalized_payload = self._normalize_microservice_payload(payload, payment_request=payment_request)
+        payload = {**payload, **normalized_payload}
+        if "success" not in normalized_payload:
+            payload.pop("success", None)
         if payment_request.request_id != request_id and request_id:
             payment_request.request_id = request_id
         if payment_request.status in {
@@ -816,29 +825,61 @@ class PaymentService:
         }
         return self.handle_webhook(payload)
 
-    def retry_stale_processing(self, *, older_than_seconds=PROCESSING_TIMEOUT_SECONDS, limit=50, query_status=False):
-        cutoff = timezone.now() - timezone.timedelta(seconds=older_than_seconds)
-        requests = PaymentRequest.objects.filter(status=PaymentRequest.Status.PROCESSING, created_at__lt=cutoff).order_by("created_at")[:limit]
+    def retry_stale_processing(
+        self,
+        *,
+        query_after_seconds=STATUS_QUERY_AFTER_SECONDS,
+        timeout_seconds=PROCESSING_TIMEOUT_SECONDS,
+        limit=50,
+        query_status=True,
+    ):
+        now = timezone.now()
+        query_cutoff = now - timezone.timedelta(seconds=query_after_seconds)
+        requests = PaymentRequest.objects.filter(
+            status=PaymentRequest.Status.PROCESSING,
+            created_at__lt=query_cutoff,
+        ).order_by("created_at")[:limit]
         processed = 0
         for payment_request in requests:
-            timeout_reason = f"Payment request timed out after {older_than_seconds} seconds without a final microservice response."
+            age_seconds = (now - payment_request.created_at).total_seconds()
             pesaway_inbound = self._is_pesaway_core() and payment_request.operation != PaymentRequest.Operation.PAYOUT
-            if self.sandbox or not query_status or not self._supports_status_query() or pesaway_inbound:
-                self.fail_processing_request(payment_request, timeout_reason)
-                processed += 1
-                continue
-            try:
-                self.query_status(payment_request)
-            except LedgerError as exc:
-                self.fail_processing_request(
-                    payment_request,
-                    f"Payment status check failed after {older_than_seconds} seconds: {exc}",
-                )
-                processed += 1
-                continue
+            query_error = None
+            if (
+                query_status
+                and not self.sandbox
+                and self._supports_status_query()
+                and not pesaway_inbound
+                and payment_request.request_id
+            ):
+                try:
+                    self.query_status(payment_request)
+                except Exception as exc:
+                    query_error = exc
             payment_request.refresh_from_db()
-            if payment_request.status == PaymentRequest.Status.PROCESSING:
-                self.fail_processing_request(payment_request, timeout_reason)
+            if payment_request.status != PaymentRequest.Status.PROCESSING:
+                processed += 1
+                continue
+            if age_seconds >= timeout_seconds:
+                if query_error:
+                    reason = f"Payment status check failed after {timeout_seconds} seconds: {query_error}"
+                else:
+                    reason = (
+                        f"Payment request timed out after {timeout_seconds} seconds "
+                        "without a final callback or status response."
+                    )
+                self.fail_processing_request(payment_request, reason)
+            else:
+                if query_error:
+                    payment_request.last_error = (
+                        f"Payment status query failed; will retry until the {timeout_seconds}-second timeout: "
+                        f"{query_error}"
+                    )[:255]
+                else:
+                    payment_request.last_error = (
+                        f"Payment is still processing after {query_after_seconds} seconds; "
+                        "awaiting final callback or status response."
+                    )
+                payment_request.save(update_fields=["last_error", "updated_at"])
             processed += 1
         return processed
 
