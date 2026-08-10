@@ -41,6 +41,7 @@ from base.services import (
     get_payee_for_user,
     get_schedule_for_user,
     invite_organization_member,
+    instruction_receipt_number,
     quick_pay,
     ledger_description,
     list_batches,
@@ -420,8 +421,11 @@ def _serialize_ledger_entry(entry):
 
 
 def _serialize_instruction(instruction):
+    receipt_number = instruction_receipt_number(instruction)
     return {
         "id": str(instruction.id),
+        "reference": receipt_number,
+        "receipt_number": receipt_number,
         "payee_id": str(instruction.payee_id) if instruction.payee_id else None,
         "recipient_name": instruction.recipient_name,
         "recipient_type": instruction.recipient_type,

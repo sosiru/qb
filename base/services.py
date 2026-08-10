@@ -91,6 +91,31 @@ def generate_transaction_reference():
     return unique_transaction_reference("RT")
 
 
+def format_internal_reference(prefix, created_at=None, seed=""):
+    created_at = created_at or timezone.now()
+    token = str(seed or "").replace("-", "").upper()[:8] or secrets.token_hex(4).upper()
+    return f"{prefix}-QB-{created_at:%Y%m%d}-{token}"
+
+
+def instruction_receipt_number(instruction):
+    response = instruction.microservice_response or {}
+    candidates = [
+        response.get("transaction_receipt"),
+        response.get("receipt"),
+        response.get("mpesa_receipt_number"),
+        (response.get("callback") or {}).get("transaction_receipt") if isinstance(response.get("callback"), dict) else "",
+        (response.get("callback") or {}).get("receipt") if isinstance(response.get("callback"), dict) else "",
+        (response.get("callback") or {}).get("mpesa_receipt_number") if isinstance(response.get("callback"), dict) else "",
+        (response.get("submission_response") or {}).get("transaction_receipt") if isinstance(response.get("submission_response"), dict) else "",
+        instruction.microservice_request_id,
+    ]
+    for candidate in candidates:
+        candidate = str(candidate or "").strip()
+        if candidate:
+            return candidate
+    return format_internal_reference("POT", instruction.created_at, instruction.id)
+
+
 def record_transaction_event(aggregate_type, aggregate_id, event_type, *, actor=None, from_status="", to_status="", payload=None, microservice_request_id=""):
     return TransactionEvent.objects.create(
         aggregate_type=aggregate_type,
@@ -289,6 +314,7 @@ def _instruction_queryset_for_user(user, organization_id=None):
 
 def _serialize_activity_instruction(instruction):
     destination = instruction.destination or {}
+    receipt_number = instruction_receipt_number(instruction)
     sub_parts = []
     if instruction.recipient_type == Payee.PayeeType.PAYBILL and destination.get("paybill_number"):
         sub_parts.append(f"Paybill {destination['paybill_number']}")
@@ -310,7 +336,8 @@ def _serialize_activity_instruction(instruction):
         "fee_amount_minor": instruction.fee_amount_minor,
         "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
         "status": instruction.status,
-        "reference": instruction.microservice_request_id or instruction.external_reference or str(instruction.id),
+        "reference": receipt_number,
+        "receipt_number": receipt_number,
         "description": instruction.recipient_name,
         "subtext": " · ".join(part for part in sub_parts if part),
         "created_at": instruction.created_at.isoformat(),
