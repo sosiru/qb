@@ -810,6 +810,18 @@ def change_user_password(user, payload):
     return user
 
 
+def verify_payout_owner_approval(user, payload):
+    if not user.payouts_require_owner_approval:
+        return
+
+    if payload.get("mobile_biometric_confirmed") is True:
+        return
+
+    password = payload.get("approval_password") or payload.get("password")
+    if not password or not user.check_password(password):
+        raise PermissionDeniedError("Enter your password to approve this payout.")
+
+
 def list_organizations(user, filters=None):
     filters = filters or {}
     queryset = Organization.objects.all().order_by("name")
@@ -1743,6 +1755,7 @@ def withdraw_to_mpesa(user, payload):
     amount_minor = int(payload.get("amount_minor") or 0)
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
+    verify_payout_owner_approval(user, payload)
 
     phone_number = normalize_phone_number(payload.get("phone_number") or user.mpesa_withdrawal_phone or user.phone_number)
     if not phone_number:
@@ -2073,6 +2086,7 @@ def _payment_success_notification_context(batch, user):
 def pay_individual_due_items(user, payload):
     if not can_access_individual_features(user):
         raise PermissionDeniedError("Only individual or superadmin users can use pay-all.")
+    verify_payout_owner_approval(user, payload)
 
     schedule_ids = payload.get("schedule_ids")
     payment_mode = payload.get("payment_mode", user.default_payment_mode)
@@ -2804,6 +2818,7 @@ def _quick_pay_organization(user, payees, payload):
 
 def quick_pay(user, payload):
     recipient_rows = _quick_pay_recipient_rows(payload)
+    verify_payout_owner_approval(user, payload)
 
     payment_mode = payload.get("payment_mode", user.default_payment_mode)
     if payment_mode not in PaymentBatch.PaymentMode.values:
