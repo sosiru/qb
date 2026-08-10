@@ -1658,6 +1658,10 @@ def list_wallet_ledger(user, organization_id=None, filters=None):
     queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type").filter(account__in=wallets)
     if filters.get("entry_type"):
         queryset = queryset.filter(transaction_type__name=filters["entry_type"])
+    if filters.get("direction") in LedgerTransactionRecord.Direction.values:
+        queryset = queryset.filter(direction=filters["direction"])
+    if filters.get("status") in LedgerTransactionRecord.Status.values:
+        queryset = queryset.filter(status=filters["status"])
     return queryset.order_by("-created_at")
 
 
@@ -1779,6 +1783,67 @@ def _calculate_instruction_fee(amount_minor):
     return max(0, int(amount_minor) * SERVICE_FEE_BPS // 10000)
 
 
+def _batch_required_total(batch):
+    return int(batch.total_amount_minor or 0) + int(batch.fee_amount_minor or 0)
+
+
+def _batch_spendable_wallet(batch):
+    if batch.organization_id:
+        return ensure_organization_wallet(batch.organization)
+    if not batch.user_id:
+        raise ValidationError("A user-backed wallet is required for this payout.")
+    primary_wallet, _ = ensure_user_wallets(batch.user)
+    return primary_wallet
+
+
+def _batch_collection_actor(batch, actor=None):
+    collection_actor = actor or batch.user or batch.approved_by or batch.submitted_by
+    if not collection_actor:
+        raise ValidationError("A funding phone number is required before this payout can run.")
+    return collection_actor
+
+
+def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
+    collection_actor = _batch_collection_actor(batch, actor)
+    phone_number = payment_stk_phone_number(collection_actor.phone_number)
+    if not phone_number:
+        raise ValidationError("A valid phone number is required to fund the wallet before payout.")
+    from_status = batch.status
+    batch.status = PaymentBatch.Status.PROCESSING
+    batch.metadata["orchestration_stage"] = "AWAITING_WALLET_FUNDING"
+    batch.metadata["collection_status"] = "PROCESSING"
+    batch.metadata["collection_amount_minor"] = int(amount_minor)
+    batch.metadata["collection_reason"] = reason
+    batch.metadata["collection_phone_number"] = phone_number
+    batch.save(update_fields=["status", "metadata", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.wallet_funding_requested",
+        actor=collection_actor,
+        from_status=from_status,
+        to_status=batch.status,
+        payload={
+            "amount_minor": int(amount_minor),
+            "reason": reason,
+            "phone_number": phone_number,
+            "wallet_source": "PRIMARY",
+        },
+    )
+    event = OutboxEvent.objects.create(
+        topic="collection.stk.requested",
+        aggregate_type="payment_batch",
+        aggregate_id=batch.id,
+        payload={
+            "amount_minor": int(amount_minor),
+            "phone_number": phone_number,
+            "reason": reason,
+        },
+    )
+    dispatch_outbox_event_inline(event)
+    return batch
+
+
 def _recalculate_batch_fee(batch):
     batch.fee_amount_minor = batch.instructions.aggregate(total=Sum("fee_amount_minor"))["total"] or 0
     batch.save(update_fields=["fee_amount_minor", "updated_at"])
@@ -1787,12 +1852,87 @@ def _recalculate_batch_fee(batch):
 
 def _queue_instruction_dispatches(batch):
     for instruction in batch.instructions.filter(status=PaymentInstruction.Status.PENDING):
+        already_queued = OutboxEvent.objects.filter(
+            topic="payment.instruction.dispatch",
+            aggregate_type="payment_instruction",
+            aggregate_id=instruction.id,
+            status__in=[OutboxEvent.Status.PENDING, OutboxEvent.Status.PROCESSING, OutboxEvent.Status.DONE],
+        ).exists()
+        if already_queued:
+            continue
         OutboxEvent.objects.create(
             topic="payment.instruction.dispatch",
             aggregate_type="payment_instruction",
             aggregate_id=instruction.id,
             payload={"batch_id": str(batch.id)},
         )
+
+
+class PaymentOrchestrationEngine:
+    def __init__(self, batch, actor=None):
+        self.batch = batch
+        self.actor = actor
+
+    @property
+    def required_total_minor(self):
+        return self.batch.total_amount_minor + self.batch.fee_amount_minor
+
+    def spendable_wallet(self):
+        wallet = ensure_organization_wallet(self.batch.organization) if self.batch.organization_id else ensure_user_wallets(self.batch.user)[0]
+        if wallet.account_kind != Account.AccountKind.PRIMARY:
+            raise ValidationError("Payouts can only be funded from the primary wallet.")
+        return wallet
+
+    def collection_phone_number(self):
+        candidate = self.batch.user or self.batch.approved_by or self.batch.submitted_by or self.actor
+        phone_number = payment_stk_phone_number(getattr(candidate, "phone_number", ""))
+        if not phone_number:
+            raise ValidationError("A valid phone number is required to fund the wallet before payout.")
+        return phone_number
+
+    def mark_processing(self, payload):
+        from_status = self.batch.status
+        self.batch.status = PaymentBatch.Status.PROCESSING
+        self.batch.metadata["orchestration_stage"] = payload.get("orchestration_stage") or "processing"
+        self.batch.save(update_fields=["status", "metadata", "updated_at"])
+        record_transaction_event(
+            "payment_batch",
+            self.batch.id,
+            "payment_batch.processing",
+            actor=self.actor,
+            from_status=from_status,
+            to_status=self.batch.status,
+            payload=payload,
+        )
+
+    def request_wallet_funding(self, *, reason):
+        self.mark_processing({"dispatch": "collection.stk.requested", "orchestration_stage": "awaiting_wallet_funding", "reason": reason})
+        event = OutboxEvent.objects.create(
+            topic="collection.stk.requested",
+            aggregate_type="payment_batch",
+            aggregate_id=self.batch.id,
+            payload={
+                "amount_minor": self.required_total_minor,
+                "phone_number": self.collection_phone_number(),
+                "reason": "Wallet funding before payout",
+            },
+        )
+        logger.info(
+            "payment.orchestration.collection_queued batch_id=%s event_id=%s amount_minor=%s",
+            self.batch.id,
+            event.id,
+            self.required_total_minor,
+        )
+        dispatch_outbox_event_inline(event)
+        return self.batch
+
+    def queue_payouts(self):
+        self.batch.metadata["orchestration_stage"] = "payout_dispatch_queued"
+        self.batch.metadata["instruction_dispatch_queued_at"] = timezone.now().isoformat()
+        self.batch.save(update_fields=["metadata", "updated_at"])
+        _queue_instruction_dispatches(self.batch)
+        logger.info("payment.orchestration.payouts_queued batch_id=%s instruction_count=%s", self.batch.id, self.batch.instructions.count())
+        return self.batch
 
 
 def _mark_batch_success(batch, actor=None):
@@ -2304,27 +2444,17 @@ def settle_batch(batch, actor, simulate_collection=True):
         simulate_collection,
         batch.status,
     )
+    required_total = _batch_required_total(batch)
     if batch.payment_mode == PaymentBatch.PaymentMode.WALLET:
-        if batch.organization_id:
-            wallet = ensure_organization_wallet(batch.organization)
-        else:
-            wallet, _ = ensure_user_wallets(batch.user)
-        required_total = batch.total_amount_minor + batch.fee_amount_minor
+        wallet = _batch_spendable_wallet(batch)
         if wallet.available_balance_minor < required_total:
-            queue_wallet_owner_notifications(
-                wallet,
-                "WALLET_LOW",
-                {
-                    "batch_id": str(batch.id),
-                    "wallet_balance_minor": wallet.available_balance_minor,
-                    "total_amount_minor": required_total,
-                    "shortfall_minor": required_total - wallet.available_balance_minor,
-                    "schedule_count": batch.instructions.count(),
-                },
-                scheduled_for=timezone.now(),
+            shortfall_minor = required_total - wallet.available_balance_minor
+            return _queue_batch_wallet_collection(
+                batch,
+                actor,
+                shortfall_minor,
+                reason="wallet_shortfall_before_payout",
             )
-            _mark_batch_failure(batch, actor, "insufficient_wallet_balance")
-            raise ValidationError("Insufficient wallet balance.")
 
         reference = generate_transaction_reference()
         ledger_tx = initiate_payout(
@@ -2343,6 +2473,7 @@ def settle_batch(batch, actor, simulate_collection=True):
             },
         )
         batch.metadata["ledger_transaction_id"] = str(ledger_tx.id)
+        batch.metadata["orchestration_stage"] = "WALLET_RESERVED_FOR_PAYOUT"
         batch.save(update_fields=["metadata", "updated_at"])
         if not payment_microservice_dispatch_enabled() or simulate_collection:
             complete_payout(ledger_tx)
@@ -2379,44 +2510,12 @@ def settle_batch(batch, actor, simulate_collection=True):
             return batch
     else:
         if not simulate_collection:
-            phone_number = payment_stk_phone_number(batch.user.phone_number if batch.user_id else "")
-            from_status = batch.status
-            batch.status = PaymentBatch.Status.PROCESSING
-            batch.save(update_fields=["status", "updated_at"])
-            record_transaction_event(
-                "payment_batch",
-                batch.id,
-                "payment_batch.processing",
-                actor=actor,
-                from_status=from_status,
-                to_status=batch.status,
-                payload={"dispatch": "collection.stk.requested"},
+            return _queue_batch_wallet_collection(
+                batch,
+                actor,
+                required_total,
+                reason="stk_selected_before_payout",
             )
-            event = OutboxEvent.objects.create(
-                topic="collection.stk.requested",
-                aggregate_type="payment_batch",
-                aggregate_id=batch.id,
-                payload={
-                    "amount_minor": batch.total_amount_minor + batch.fee_amount_minor,
-                    "phone_number": phone_number,
-                },
-            )
-            logger.info(
-                "payment.batch.stk.collection_queued batch_id=%s event_id=%s phone_number=%s amount_minor=%s",
-                batch.id,
-                event.id,
-                phone_number,
-                batch.total_amount_minor + batch.fee_amount_minor,
-            )
-            dispatch_outbox_event_inline(event)
-            logger.info(
-                "payment.batch.stk.collection_after_dispatch batch_id=%s event_id=%s event_status=%s last_error=%s",
-                batch.id,
-                event.id,
-                event.status,
-                event.last_error,
-            )
-            return batch
 
     batch.instructions.update(status=PaymentInstruction.Status.SUCCEEDED, failure_reason="")
     _mark_batch_success(batch, actor=actor)
@@ -2424,8 +2523,22 @@ def settle_batch(batch, actor, simulate_collection=True):
 
 
 def mark_batch_collection_complete(batch, microservice_response):
+    if batch.metadata.get("collection_status") == "SUCCEEDED" and batch.metadata.get("instruction_dispatch_queued_at"):
+        return batch
     batch.metadata["collection_response"] = microservice_response
+    batch.metadata["collection_status"] = "SUCCEEDED"
+    batch.metadata["orchestration_stage"] = "WALLET_FUNDED_DISPATCHING_PAYOUTS"
+    batch.metadata["instruction_dispatch_queued_at"] = timezone.now().isoformat()
     batch.save(update_fields=["metadata", "updated_at"])
+    record_transaction_event(
+        "payment_batch",
+        batch.id,
+        "payment_batch.wallet_funding_succeeded",
+        actor=_batch_notification_user(batch),
+        from_status=batch.status,
+        to_status=batch.status,
+        payload={"collection_response": microservice_response},
+    )
     _queue_instruction_dispatches(batch)
     return batch
 
@@ -2780,11 +2893,89 @@ def build_approval_queue(user, organization_id=None):
     return queue
 
 
+TRANSACTION_STATUS_ALIASES = {
+    "PENDING": {
+        "instructions": [PaymentInstruction.Status.PENDING],
+        "ledger": [],
+    },
+    "PROCESSING": {
+        "instructions": [],
+        "ledger": [LedgerTransactionRecord.Status.PROCESSING],
+    },
+    "SUCCEEDED": {
+        "instructions": [PaymentInstruction.Status.SUCCEEDED],
+        "ledger": [LedgerTransactionRecord.Status.COMPLETED],
+    },
+    "FAILED": {
+        "instructions": [PaymentInstruction.Status.FAILED],
+        "ledger": [LedgerTransactionRecord.Status.FAILED],
+    },
+}
+
+
+def _normalized_transaction_status(value):
+    status = str(value or "").strip().upper()
+    if status in {"SUCCESS", "SUCCESSFUL", "COMPLETED"}:
+        return "SUCCEEDED"
+    return status
+
+
+def _apply_instruction_status_filter(queryset, status):
+    normalized = _normalized_transaction_status(status)
+    if normalized == "PROCESSING":
+        return queryset.filter(status=PaymentInstruction.Status.PENDING, batch__status=PaymentBatch.Status.PROCESSING)
+    if normalized == "PENDING":
+        return queryset.filter(status=PaymentInstruction.Status.PENDING).exclude(batch__status=PaymentBatch.Status.PROCESSING)
+    statuses = TRANSACTION_STATUS_ALIASES.get(normalized, {}).get("instructions")
+    if statuses is None:
+        return queryset
+    if not statuses:
+        return queryset.none()
+    return queryset.filter(status__in=statuses)
+
+
+def _apply_ledger_status_filter(queryset, status):
+    normalized = _normalized_transaction_status(status)
+    statuses = TRANSACTION_STATUS_ALIASES.get(normalized, {}).get("ledger")
+    if statuses is None:
+        return queryset
+    if not statuses:
+        return queryset.none()
+    return queryset.filter(status__in=statuses)
+
+
+def _serialize_wallet_activity(entry, transaction_kind):
+    metadata = entry.metadata or {}
+    fee_amount_minor = int(metadata.get("fee_amount_minor") or 0)
+    base_amount_minor = int(metadata.get("base_amount_minor") or entry.amount_minor - fee_amount_minor)
+    signed_amount_minor = -entry.amount_minor if entry.direction == LedgerTransactionRecord.Direction.PAY_OUT else entry.amount_minor
+    return {
+        "id": str(entry.id),
+        "transaction_kind": transaction_kind,
+        "wallet_id": str(entry.account_id),
+        "wallet_type": entry.account.wallet_type,
+        "entry_type": metadata.get("entry_type") or entry.transaction_type.name,
+        "amount_minor": signed_amount_minor,
+        "base_amount_minor": base_amount_minor,
+        "fee_amount_minor": fee_amount_minor,
+        "gross_amount_minor": entry.amount_minor,
+        "status": "SUCCEEDED" if entry.status == LedgerTransactionRecord.Status.COMPLETED else entry.status,
+        "reference": entry.internal_reference,
+        "description": entry.description or ledger_description(entry.transaction_type.name, metadata),
+        "recipient_name": metadata.get("recipient_name") or entry.description or entry.transaction_type.simple_name,
+        "recipient_type": metadata.get("recipient_type") or (entry.payment_method.name if entry.payment_method_id else ""),
+        "category": metadata.get("category") or metadata.get("entry_type") or "Wallet",
+        "created_at": entry.created_at.isoformat(),
+        "metadata": metadata,
+    }
+
+
 def build_transaction_summary(user, organization_id=None, filters=None):
     filters = filters or {}
+    transaction_kind = str(filters.get("transaction_kind") or filters.get("kind") or "pay_out").lower()
     instruction_queryset = _instruction_queryset_for_user(user, organization_id)
-    if filters.get("status") in PaymentInstruction.Status.values:
-        instruction_queryset = instruction_queryset.filter(status=filters["status"])
+    if filters.get("status"):
+        instruction_queryset = _apply_instruction_status_filter(instruction_queryset, filters["status"])
     if filters.get("category"):
         instruction_queryset = instruction_queryset.filter(category=filters["category"].strip())
     if filters.get("recipient_type") in Payee.PayeeType.values:
@@ -2802,10 +2993,12 @@ def build_transaction_summary(user, organization_id=None, filters=None):
     instruction_queryset = instruction_queryset.filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
 
     if organization_id:
-        wallet_queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type").filter(account__organization_id=organization_id)
+        wallet_queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type", "payment_method").filter(account__organization_id=organization_id)
     else:
-        wallet_queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type").filter(account__user=user)
+        wallet_queryset = LedgerTransactionRecord.objects.select_related("account", "transaction_type", "payment_method").filter(account__user=user)
     wallet_queryset = wallet_queryset.filter(created_at__date__gte=date_from, created_at__date__lte=date_to).order_by("created_at")
+    if filters.get("status"):
+        wallet_queryset = _apply_ledger_status_filter(wallet_queryset, filters["status"])
 
     summary = instruction_queryset.aggregate(
         total_base=Sum("amount_minor"),
@@ -2820,7 +3013,17 @@ def build_transaction_summary(user, organization_id=None, filters=None):
     if first_entry:
         opening_balance = first_entry.balance_after_minor
 
-    transactions = [_serialize_activity_instruction(instruction) for instruction in instruction_queryset[:200]]
+    if transaction_kind in {"pay_in", "pay-ins", "payins"}:
+        visible_wallet_queryset = wallet_queryset.filter(direction=LedgerTransactionRecord.Direction.PAY_IN).order_by("-created_at")
+        transactions = [_serialize_wallet_activity(entry, "PAY_IN") for entry in visible_wallet_queryset[:200]]
+    elif transaction_kind == "statement":
+        visible_wallet_queryset = wallet_queryset.filter(status=LedgerTransactionRecord.Status.COMPLETED).order_by("-created_at")
+        transactions = [_serialize_wallet_activity(entry, "STATEMENT") for entry in visible_wallet_queryset[:200]]
+    else:
+        transactions = [
+            {**_serialize_activity_instruction(instruction), "transaction_kind": "PAY_OUT"}
+            for instruction in instruction_queryset[:200]
+        ]
     return {
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
