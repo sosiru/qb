@@ -146,7 +146,7 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/register/",
             {
-                "phone_number": "254710956633",
+                "phone_number": "254700000633",
                 "password": "StrongPass123!",
                 "full_name": "OTP User",
                 "email": "otp-user@example.com",
@@ -158,13 +158,13 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/login/",
             {
-                "phone_number": "0710956633",
+                "phone_number": "0700000633",
                 "password": "StrongPass123!",
             },
         )
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.json()["otp_required"])
-        self.assertEqual(response.json()["phone_number"], "254710956633")
+        self.assertEqual(response.json()["phone_number"], "254700000633")
         dev_otp = response.json()["dev_otp"]
         self.assertRegex(dev_otp, r"^\d{5}$")
         otp_events = NotificationEvent.objects.filter(event_type="LOGIN_OTP")
@@ -175,7 +175,7 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/login/",
             {
-                "phone_number": "254710956633",
+                "phone_number": "254700000633",
                 "password": "StrongPass123!",
                 "otp": "654321",
             },
@@ -185,14 +185,61 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post(
             "/api/v1/auth/login/",
             {
-                "phone_number": "254710956633",
+                "phone_number": "254700000633",
                 "password": "StrongPass123!",
                 "otp": dev_otp,
             },
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("token", response.json())
-        self.assertEqual(response.json()["user"]["phone_number"], "254710956633")
+        self.assertEqual(response.json()["user"]["phone_number"], "254700000633")
+
+    @override_settings(DEBUG=True)
+    def test_login_otp_queues_sms_and_email_even_when_preferences_are_disabled(self):
+        user = User.objects.create_user(
+            phone_number="254700000198",
+            password="StrongPass123!",
+            full_name="OTP Required",
+            email="otp-required@example.com",
+            account_type="INDIVIDUAL",
+            sms_notifications_enabled=False,
+            email_notifications_enabled=False,
+        )
+
+        response = self._post(
+            "/api/v1/auth/login/",
+            {
+                "phone_number": user.phone_number,
+                "password": "StrongPass123!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 202)
+        events = NotificationEvent.objects.filter(event_type="LOGIN_OTP")
+        self.assertEqual({event.channel for event in events}, {"EMAIL", "SMS"})
+
+    def test_registration_notification_queues_sms_and_email_even_when_preferences_are_disabled(self):
+        user = User.objects.create_user(
+            phone_number="254700000197",
+            password="StrongPass123!",
+            full_name="Registered User",
+            email="registered-user@example.com",
+            account_type="INDIVIDUAL",
+            sms_notifications_enabled=False,
+            email_notifications_enabled=False,
+        )
+
+        events = queue_notifications_for_user(
+            user,
+            "SELF_ONBOARDING",
+            {
+                "user_name": user.full_name,
+                "phone_number": user.phone_number,
+                "account_type": user.account_type,
+            },
+        )
+
+        self.assertEqual({event.channel for event in events}, {"EMAIL", "SMS"})
 
     def test_individual_vault_transfer(self):
         response = self._post(
@@ -627,6 +674,66 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(response.json()["batch"]["total_amount_minor"], 55000)
         self.assertEqual(response.json()["batch"]["fee_amount_minor"], 1100)
         self.assertEqual(response.json()["batch"]["gross_amount_minor"], 56100)
+        self.assertEqual(response.json()["batch"]["bill_total_minor"], 55000)
+        self.assertEqual(response.json()["batch"]["total_charged_minor"], 56100)
+
+        detail_response = self.client.get(
+            f"/api/v1/batches/{batch.id}/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.json()
+        self.assertEqual(detail["batch"]["lifecycle_status"], "COMPLETED")
+        self.assertEqual(detail["batch"]["disbursement_status"], "SUCCEEDED")
+        self.assertEqual(sum(item["amount_minor"] for item in detail["instructions"]), 55000)
+        self.assertEqual(sum(item["fee_amount_minor"] for item in detail["instructions"]), 1100)
+
+    def test_quick_pay_requires_explicit_amounts_for_multiple_bills(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000078",
+                "password": "StrongPass123!",
+                "full_name": "Explicit Allocation User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        token = response.json()["token"]
+        payee_one_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Bill One",
+                "payee_type": "PAYBILL",
+                "paybill_number": "777003",
+                "account_reference": "BILL-1",
+                "expense_category": "utilities",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+        payee_two_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Bill Two",
+                "payee_type": "PAYBILL",
+                "paybill_number": "777004",
+                "account_reference": "BILL-2",
+                "expense_category": "utilities",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+
+        response = self._post(
+            "/api/v1/payments/quick-pay/",
+            {
+                "payee_ids": [payee_one_id, payee_two_id],
+                "amount_minor": 25000,
+                "payment_mode": "WALLET",
+            },
+            token=token,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("amount_minor", response.json()["error"])
 
     def test_approval_required_schedules_are_skipped_by_autopay_runner(self):
         user = User.objects.create_user(

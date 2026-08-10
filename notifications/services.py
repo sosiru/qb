@@ -114,10 +114,14 @@ def _merge_context(template, context):
     return merged
 
 
-def _recipients_for_channel(user, channel):
-    if channel == "SMS" and user and user.sms_notifications_enabled and user.phone_number:
+MANDATORY_AUTH_EVENT_TYPES = {"SELF_ONBOARDING", "LOGIN_OTP"}
+
+
+def _recipients_for_channel(user, channel, event_type=None):
+    bypass_preferences = event_type in MANDATORY_AUTH_EVENT_TYPES
+    if channel == "SMS" and user and (bypass_preferences or user.sms_notifications_enabled) and user.phone_number:
         return [str(user.phone_number)]
-    if channel == "EMAIL" and user and user.email_notifications_enabled and user.email:
+    if channel == "EMAIL" and user and (bypass_preferences or user.email_notifications_enabled) and user.email:
         return [str(user.email)]
     if channel == "IN_APP" and user:
         return [str(user.id)]
@@ -162,7 +166,7 @@ def queue_notifications_for_user(user, event_type, context=None, scheduled_for=N
     for template in templates:
         if not notification_channel_enabled(event_type, template.channel):
             continue
-        recipients = _recipients_for_channel(user, template.channel)
+        recipients = _recipients_for_channel(user, template.channel, event_type)
         if not recipients:
             continue
         event = NotificationEvent.objects.create(
