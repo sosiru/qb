@@ -1219,10 +1219,36 @@ def get_organization_for_user(user, organization_id, allowed_roles=None):
     return membership.organization
 
 
+def _normalize_payee_payload(payload):
+    normalized = dict(payload or {})
+    payee_type = normalized.get("payee_type") or normalized.get("type") or ""
+    if payee_type and not normalized.get("payee_type"):
+        normalized["payee_type"] = payee_type
+
+    destination = normalized.get("destination") or normalized.get("destination_value") or ""
+    if destination:
+        if not normalized.get("phone_number") and not normalized.get("paybill_number") and not normalized.get("till_number"):
+            if payee_type == Payee.PayeeType.PAYBILL:
+                normalized["paybill_number"] = destination
+            elif payee_type == Payee.PayeeType.TILL:
+                normalized["till_number"] = destination
+            elif payee_type == Payee.PayeeType.BANK:
+                normalized["account_number"] = destination
+            else:
+                normalized["phone_number"] = destination
+
+    reference = normalized.get("reference") or normalized.get("destination_reference") or ""
+    if reference and not normalized.get("account_reference"):
+        normalized["account_reference"] = reference
+
+    return normalized
+
+
 def _resolve_payee_preset(payload):
+    payload = _normalize_payee_payload(payload)
     preset_id = payload.get("preset_id")
     if not preset_id:
-        return dict(payload), None
+        return payload, None
 
     preset = PayeePreset.objects.filter(id=preset_id, active=True).first()
     if not preset:
@@ -1386,15 +1412,16 @@ def get_payee_for_user(user, payee_id):
 
 def update_payee(user, payee_id, payload):
     payee = get_payee_for_user(user, payee_id)
+    normalized_payload = _normalize_payee_payload(payload)
     candidate = {
-        "payee_type": payload.get("payee_type", payee.payee_type),
-        "label": payload.get("label", payee.label),
-        "paybill_number": payload.get("paybill_number", payee.paybill_number),
-        "till_number": payload.get("till_number", payee.till_number),
-        "phone_number": normalize_phone_number(payload.get("phone_number", payee.phone_number)),
-        "bank_name": payload.get("bank_name", payee.bank_name),
-        "bank_code": payload.get("bank_code", payee.bank_code),
-        "account_number": payload.get("account_number", payee.account_number),
+        "payee_type": normalized_payload.get("payee_type", payee.payee_type),
+        "label": normalized_payload.get("label", payee.label),
+        "paybill_number": normalized_payload.get("paybill_number", payee.paybill_number),
+        "till_number": normalized_payload.get("till_number", payee.till_number),
+        "phone_number": normalize_phone_number(normalized_payload.get("phone_number", payee.phone_number)),
+        "bank_name": normalized_payload.get("bank_name", payee.bank_name),
+        "bank_code": normalized_payload.get("bank_code", payee.bank_code),
+        "account_number": normalized_payload.get("account_number", payee.account_number),
     }
     _validate_payee(candidate)
 
@@ -1412,8 +1439,8 @@ def update_payee(user, payee_id, payload):
         "expense_category",
         "active",
     ]:
-        if field_name in payload:
-            value = payload.get(field_name)
+        if field_name in normalized_payload:
+            value = normalized_payload.get(field_name)
             if isinstance(getattr(payee, field_name), str):
                 value = (value or "").strip()
             if field_name == "phone_number":
@@ -2001,12 +2028,13 @@ def _queue_instruction_dispatches(batch):
         ).exists()
         if already_queued:
             continue
-        OutboxEvent.objects.create(
+        event = OutboxEvent.objects.create(
             topic="payment.instruction.dispatch",
             aggregate_type="payment_instruction",
             aggregate_id=instruction.id,
             payload={"batch_id": str(batch.id)},
         )
+        dispatch_outbox_event_inline(event)
 
 
 class PaymentOrchestrationEngine:

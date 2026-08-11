@@ -13,12 +13,14 @@ from audit.models import AuditLog
 from eusers.models import AccessToken, User
 from notifications.models import NotificationEvent
 from notifications.services import (
+    NotificationDispatchError,
     NotificationInterface,
     build_email_message,
     build_notification_payload,
     create_all_reminder_notifications,
     queue_notifications_for_user,
     serialize_in_app_notification,
+    validate_notification_configuration,
 )
 from reports.models import ReportExport
 from ledger.models import Account, PaymentRequest
@@ -158,6 +160,36 @@ class QuickBillsPlatformTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertFalse(ExpenseCategory.objects.filter(name="My Monthly Bills").exists())
+
+    def test_payee_creation_accepts_mobile_destination_payload(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000603",
+                "password": "StrongPass123!",
+                "full_name": "Destination User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        token = response.json()["token"]
+
+        response = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Quick bill",
+                "type": "PAYBILL",
+                "destination": "888880",
+                "reference": "ACC123",
+                "expense_category": "utilities",
+            },
+            token=token,
+        )
+        self.assertEqual(response.status_code, 201)
+        payee = response.json()["payee"]
+        self.assertEqual(payee["payee_type"], "PAYBILL")
+        self.assertEqual(payee["paybill_number"], "888880")
+        self.assertEqual(payee["account_reference"], "ACC123")
 
     def test_individual_payment_flow(self):
         response = self._post(
@@ -1227,6 +1259,7 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["batch"]["status"], "REJECTED")
 
+    @override_settings(PAYMENT_MICROSERVICE_INLINE_DISPATCH=False)
     def test_microservice_enabled_wallet_flow_uses_outbox_dispatch(self):
         response = self._post(
             "/api/v1/auth/register/",
@@ -1282,6 +1315,54 @@ class QuickBillsPlatformTests(TestCase):
         instruction = PaymentInstruction.objects.get(batch=batch)
         self.assertEqual(batch.status, PaymentBatch.Status.SUCCEEDED)
         self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
+        self.assertTrue(instruction.microservice_request_id.startswith("SIM-"))
+
+    def test_microservice_enabled_wallet_flow_dispatches_inline_by_default(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000021",
+                "password": "StrongPass123!",
+                "full_name": "Inline Microservice User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        token = response.json()["token"]
+        payee_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Inline Allowance",
+                "payee_type": "MOBILE",
+                "phone_number": "254733333334",
+                "expense_category": "family",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+        self._post(
+            "/api/v1/schedules/",
+            {
+                "payee_id": payee_id,
+                "amount_minor": 100000,
+                "day_of_month": timezone.localdate().day,
+            },
+            token=token,
+        )
+        self._post("/api/v1/wallets/topups/", {"amount_minor": 200000}, token=token)
+
+        with patch("base.services.payment_microservice_dispatch_enabled", return_value=True):
+            response = self._post(
+                "/api/v1/payments/pay-all/",
+                {"payment_mode": "WALLET", "simulate_collection": False},
+                token=token,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        batch = PaymentBatch.objects.get(id=response.json()["batch"]["id"])
+        instruction = PaymentInstruction.objects.get(batch=batch)
+        event = OutboxEvent.objects.get(topic="payment.instruction.dispatch", aggregate_id=instruction.id)
+        self.assertEqual(batch.status, PaymentBatch.Status.SUCCEEDED)
+        self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
+        self.assertEqual(event.status, OutboxEvent.Status.DONE)
         self.assertTrue(instruction.microservice_request_id.startswith("SIM-"))
 
     def test_successful_microservice_payout_queues_sms_and_email_with_sender_details(self):
@@ -1627,6 +1708,27 @@ class QuickBillsPlatformTests(TestCase):
         self.assertTrue(all(set(payload["body"]["context"]) == {"message"} for payload in sent_payloads))
         self.assertTrue(all(payload["headers"].get("X-api-key") == "notify-key" for payload in sent_payloads))
         self.assertEqual(len(mail.outbox), 0)
+
+    @override_settings(NOTIFY_URL="", NOTIFY_API_KEY="")
+    def test_notification_config_validation_requires_provider_key(self):
+        with self.assertRaises(NotificationDispatchError) as context:
+            validate_notification_configuration()
+
+        message = str(context.exception)
+        self.assertIn("NOTIFY must be configured", message)
+        self.assertIn("NOTIFY_API_KEY must be configured", message)
+
+    @override_settings(
+        NOTIFY_URL="https://notify.example/api/send",
+        NOTIFY_API_KEY="notify-key",
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_PASSWORD="",
+    )
+    def test_notification_config_validation_can_require_email_backup_password(self):
+        with self.assertRaises(NotificationDispatchError) as context:
+            validate_notification_configuration(require_email_backup=True)
+
+        self.assertIn("EMAIL_HOST_PASSWORD must be configured", str(context.exception))
 
     def test_login_success_notification_is_email_only(self):
         user = User.objects.create_user(

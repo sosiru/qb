@@ -4,6 +4,7 @@ import time
 import uuid
 from datetime import timedelta
 from urllib import error, request
+from urllib.parse import urlparse
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
@@ -99,6 +100,42 @@ class NotificationInterface:
 
 def notifications_dispatch_enabled():
     return bool(settings.NOTIFY_URL and settings.NOTIFY_API_KEY)
+
+
+def validate_notification_configuration(*, require_email_backup=False):
+    errors = []
+    warnings = []
+    notify_url = (settings.NOTIFY_URL or "").strip()
+    api_key = (settings.NOTIFY_API_KEY or "").strip()
+
+    if not notify_url:
+        errors.append("NOTIFY must be configured with the notification provider URL.")
+    else:
+        parsed = urlparse(notify_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            errors.append("NOTIFY must be a valid http(s) URL.")
+
+    if not api_key:
+        errors.append("NOTIFY_API_KEY must be configured.")
+    elif len(api_key) < 8:
+        warnings.append("NOTIFY_API_KEY is unusually short; confirm the full provider key is set.")
+
+    if require_email_backup and settings.EMAIL_BACKEND.endswith("smtp.EmailBackend") and not settings.EMAIL_HOST_PASSWORD:
+        errors.append("EMAIL_HOST_PASSWORD must be configured for SMTP email backup.")
+
+    if errors:
+        raise NotificationDispatchError(" ".join(errors))
+
+    return {
+        "configured": True,
+        "notify_url": notify_url,
+        "api_key_present": bool(api_key),
+        "api_key_length": len(api_key),
+        "email_backup_configured": not (
+            settings.EMAIL_BACKEND.endswith("smtp.EmailBackend") and not settings.EMAIL_HOST_PASSWORD
+        ),
+        "warnings": warnings,
+    }
 
 
 def notification_channel_enabled(event_type, channel):

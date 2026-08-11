@@ -229,7 +229,7 @@ class _StatementPdf:
 
     def _new_page(self):
         self.ops = []
-        self._image("Logo", 42, 726, 92, 92)
+        self._image("Logo", 42, 744, 122, 61)
 
     def _finish_page(self):
         self.pages.append("\n".join(self.ops))
