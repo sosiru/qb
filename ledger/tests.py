@@ -540,6 +540,60 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(self.account.available_balance_minor, 100000)
         self.assertEqual(self.account.reserved_balance_minor, 0)
 
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="qb",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+    )
+    def test_live_pesaway_payout_stays_processing_and_does_not_debit_until_success_callback(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-PENDING"))
+
+        with patch.object(
+            PaymentService,
+            "_post",
+            return_value={
+                "success": True,
+                "message": "Outbound transfer queued",
+                "data": {"outbound_transfer_id": "OUT-PENDING-001", "status": "QUEUED"},
+            },
+        ):
+            payment_request = PaymentService(
+                sandbox=False,
+                base_url="https://payments.lipasync.com/api/v1/core",
+            ).initiate_payout(
+                self.account,
+                amount_minor=75000,
+                destination={"phone_number": "254700900001"},
+            )
+
+        payment_request.refresh_from_db()
+        payment_request.transaction.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(payment_request.transaction.status, Transaction.Status.PROCESSING)
+        self.assertEqual(self.account.available_balance_minor, 100000)
+        self.assertEqual(self.account.current_balance_minor, 100000)
+        self.assertEqual(self.account.reserved_balance_minor, 0)
+
+        PaymentService().handle_webhook(
+            {
+                "event": "outbound_transfer.success",
+                "outbound_transfer_id": "OUT-PENDING-001",
+                "status": "SUCCESS",
+                "external_reference": payment_request.originator_ref,
+                "provider_transaction_id": "PHY123456",
+            }
+        )
+
+        payment_request.refresh_from_db()
+        payment_request.transaction.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(payment_request.transaction.status, Transaction.Status.COMPLETED)
+        self.assertEqual(payment_request.transaction.transaction_receipt, "PHY123456")
+        self.assertEqual(self.account.available_balance_minor, 25000)
+        self.assertEqual(self.account.current_balance_minor, 25000)
+        self.assertEqual(self.account.reserved_balance_minor, 0)
+
     def test_lipasync_processing_callback_keeps_payment_processing(self):
         with patch.object(
             PaymentService,

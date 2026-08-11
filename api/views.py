@@ -221,6 +221,7 @@ def _serialize_user(user):
 def _serialize_wallet(wallet):
     return {
         "id": str(wallet.id),
+        "account_number": wallet.account_number or "",
         "owner_type": wallet.owner_type,
         "wallet_type": wallet.wallet_type,
         "currency": wallet.currency,
@@ -336,7 +337,7 @@ def _serialize_batch(batch):
         lifecycle_status = f"COLLECTION_{collection_status}"
     elif batch.status in {"FAILED", "PARTIAL"}:
         lifecycle_status = "DISBURSEMENT_FAILED"
-    elif collection_status == "SUCCEEDED" and pending_instruction_count:
+    elif batch.status == "PROCESSING" and pending_instruction_count:
         lifecycle_status = "DISBURSEMENT_PROCESSING"
     elif collection_status == "PROCESSING":
         lifecycle_status = "PAYMENT_PENDING"
@@ -1080,7 +1081,7 @@ def wallet_summary_view(request):
 @require_auth
 def wallet_ledger_view(request):
     try:
-        entries = list_wallet_ledger(
+        queryset = list_wallet_ledger(
             request.api_user,
             request.GET.get("organization_id"),
             {
@@ -1092,7 +1093,23 @@ def wallet_ledger_view(request):
         )
     except DomainError as exc:
         return _handle_domain_error(exc)
-    return JsonResponse({"entries": [_serialize_ledger_entry(entry) for entry in entries]})
+    try:
+        limit = min(max(int(request.GET.get("limit", "100")), 1), 100)
+        offset = max(int(request.GET.get("offset", "0")), 0)
+    except ValueError:
+        return json_error("limit and offset must be valid numbers.", status=400)
+    total = queryset.count()
+    entries = list(queryset[offset : offset + limit])
+    return JsonResponse(
+        {
+            "entries": [_serialize_ledger_entry(entry) for entry in entries],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_next": offset + limit < total,
+            "has_previous": offset > 0,
+        }
+    )
 
 
 @api_view

@@ -20,6 +20,7 @@ def _sandbox_enabled():
 
 def request_collection_for_batch(batch_id, payload=None):
     payload = payload or {}
+    logger.info("payment_executor.collection.start batch_id=%s payload_keys=%s", batch_id, sorted(payload.keys()))
     batch = PaymentBatch.objects.select_related("user", "organization", "approved_by", "submitted_by").get(id=batch_id)
     actor = batch.user or batch.approved_by or batch.submitted_by
     if not actor:
@@ -43,6 +44,13 @@ def request_collection_for_batch(batch_id, payload=None):
             "funding_reason": payload.get("reason") or "wallet_funding_before_payout",
         },
     )
+    logger.info(
+        "payment_executor.collection.submitted batch_id=%s payment_request_id=%s request_id=%s status=%s",
+        batch.id,
+        payment_request.id,
+        payment_request.request_id,
+        payment_request.status,
+    )
     batch.metadata["collection_request_id"] = payment_request.request_id
     batch.metadata["collection_originator_ref"] = payment_request.originator_ref
     batch.metadata["collection_status"] = payment_request.status
@@ -53,6 +61,7 @@ def request_collection_for_batch(batch_id, payload=None):
 
 
 def dispatch_instruction(instruction_id):
+    logger.info("payment_executor.instruction.start instruction_id=%s", instruction_id)
     instruction = PaymentInstruction.objects.select_related("batch", "batch__user", "batch__organization").get(id=instruction_id)
     ledger_transaction_id = (instruction.batch.metadata or {}).get("ledger_transaction_id")
     ledger_transaction = LedgerTransactionRecord.objects.get(id=ledger_transaction_id) if ledger_transaction_id else None
@@ -71,10 +80,11 @@ def dispatch_instruction(instruction_id):
     }
     instruction.save(update_fields=["microservice_request_id", "microservice_response", "updated_at"])
     logger.info(
-        "payment_microservice.payout.submitted instruction_id=%s request_id=%s originator_ref=%s",
+        "payment_executor.instruction.submitted instruction_id=%s request_id=%s originator_ref=%s status=%s",
         instruction.id,
         payment_request.request_id,
         payment_request.originator_ref,
+        payment_request.status,
     )
     return payment_request.response_payload
 

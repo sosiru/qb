@@ -1867,6 +1867,12 @@ def transfer_to_vault(user, payload):
 @transaction.atomic
 def withdraw_to_mpesa(user, payload):
     amount_minor = int(payload.get("amount_minor") or 0)
+    logger.info(
+        "payment.withdrawal.start user_id=%s amount_minor=%s simulate=%s",
+        user.id,
+        amount_minor,
+        should_simulate_wallet_topup(payload),
+    )
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
     verify_payout_owner_approval(user, payload)
@@ -1876,6 +1882,13 @@ def withdraw_to_mpesa(user, payload):
         raise ValidationError("A valid M-Pesa withdrawal phone number is required.")
 
     primary_wallet, _ = ensure_user_wallets(user)
+    logger.info(
+        "payment.withdrawal.wallet_checked user_id=%s wallet_id=%s available_minor=%s requested_minor=%s",
+        user.id,
+        primary_wallet.id,
+        primary_wallet.available_balance_minor,
+        amount_minor,
+    )
     if primary_wallet.available_balance_minor < amount_minor:
         raise ValidationError("Insufficient wallet balance.")
 
@@ -1896,6 +1909,14 @@ def withdraw_to_mpesa(user, payload):
         },
     )
     primary_wallet.refresh_from_db()
+    logger.info(
+        "payment.withdrawal.submitted user_id=%s wallet_id=%s payment_request_id=%s transaction_id=%s request_status=%s",
+        user.id,
+        primary_wallet.id,
+        payment_request.id,
+        payment_request.transaction_id,
+        payment_request.status,
+    )
     queue_wallet_owner_notifications(
         primary_wallet,
         "WALLET_WITHDRAWAL_REQUESTED",
@@ -1972,6 +1993,13 @@ def _batch_collection_actor(batch, actor=None):
 
 
 def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
+    logger.info(
+        "payment.batch.collection.queue_start batch_id=%s actor_id=%s amount_minor=%s reason=%s",
+        batch.id,
+        actor.id if actor else None,
+        amount_minor,
+        reason,
+    )
     collection_actor = _batch_collection_actor(batch, actor)
     phone_number = payment_stk_phone_number(collection_actor.phone_number)
     if not phone_number:
@@ -2008,6 +2036,13 @@ def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
             "reason": reason,
         },
     )
+    logger.info(
+        "payment.batch.collection.outbox_created batch_id=%s event_id=%s amount_minor=%s phone_present=%s",
+        batch.id,
+        event.id,
+        amount_minor,
+        bool(phone_number),
+    )
     dispatch_outbox_event_inline(event)
     return batch
 
@@ -2019,6 +2054,7 @@ def _recalculate_batch_fee(batch):
 
 
 def _queue_instruction_dispatches(batch):
+    logger.info("payment.batch.instructions.queue_start batch_id=%s", batch.id)
     for instruction in batch.instructions.filter(status=PaymentInstruction.Status.PENDING):
         already_queued = OutboxEvent.objects.filter(
             topic="payment.instruction.dispatch",
@@ -2027,12 +2063,25 @@ def _queue_instruction_dispatches(batch):
             status__in=[OutboxEvent.Status.PENDING, OutboxEvent.Status.PROCESSING, OutboxEvent.Status.DONE],
         ).exists()
         if already_queued:
+            logger.info(
+                "payment.instruction.dispatch.already_queued instruction_id=%s batch_id=%s",
+                instruction.id,
+                batch.id,
+            )
             continue
         event = OutboxEvent.objects.create(
             topic="payment.instruction.dispatch",
             aggregate_type="payment_instruction",
             aggregate_id=instruction.id,
             payload={"batch_id": str(batch.id)},
+        )
+        logger.info(
+            "payment.instruction.dispatch.outbox_created instruction_id=%s batch_id=%s event_id=%s amount_minor=%s recipient_type=%s",
+            instruction.id,
+            batch.id,
+            event.id,
+            instruction.amount_minor,
+            instruction.recipient_type,
         )
         dispatch_outbox_event_inline(event)
 
@@ -2615,8 +2664,16 @@ def settle_batch(batch, actor, simulate_collection=True):
         batch.status,
     )
     required_total = _batch_required_total(batch)
+    logger.info("payment.batch.settle.total batch_id=%s required_total_minor=%s", batch.id, required_total)
     if batch.payment_mode == PaymentBatch.PaymentMode.WALLET:
         wallet = _batch_spendable_wallet(batch)
+        logger.info(
+            "payment.batch.settle.wallet_check batch_id=%s wallet_id=%s available_minor=%s required_total_minor=%s",
+            batch.id,
+            wallet.id,
+            wallet.available_balance_minor,
+            required_total,
+        )
         if wallet.available_balance_minor < required_total:
             shortfall_minor = required_total - wallet.available_balance_minor
             return _queue_batch_wallet_collection(
@@ -2641,11 +2698,24 @@ def settle_batch(batch, actor, simulate_collection=True):
                 "gross_amount_minor": required_total,
                 "status": "PROCESSING" if payment_microservice_dispatch_enabled() and not simulate_collection else "SUCCEEDED",
             },
+            reserve=not (payment_microservice_dispatch_enabled() and not simulate_collection),
         )
         batch.metadata["ledger_transaction_id"] = str(ledger_tx.id)
-        batch.metadata["orchestration_stage"] = "WALLET_RESERVED_FOR_PAYOUT"
+        batch.metadata["orchestration_stage"] = (
+            "PAYOUT_PENDING_PROVIDER_CALLBACK"
+            if payment_microservice_dispatch_enabled() and not simulate_collection
+            else "WALLET_RESERVED_FOR_PAYOUT"
+        )
         batch.save(update_fields=["metadata", "updated_at"])
+        logger.info(
+            "payment.batch.settle.ledger_created batch_id=%s ledger_transaction_id=%s reserve_wallet=%s orchestration_stage=%s",
+            batch.id,
+            ledger_tx.id,
+            not (payment_microservice_dispatch_enabled() and not simulate_collection),
+            batch.metadata.get("orchestration_stage"),
+        )
         if not payment_microservice_dispatch_enabled() or simulate_collection:
+            logger.info("payment.batch.settle.complete_local_payout batch_id=%s ledger_transaction_id=%s", batch.id, ledger_tx.id)
             complete_payout(ledger_tx)
         wallet.refresh_from_db()
         low_wallet_threshold = getattr(settings, "NOTIFY_LOW_WALLET_THRESHOLD_MINOR", 0)
@@ -2680,6 +2750,11 @@ def settle_batch(batch, actor, simulate_collection=True):
             return batch
     else:
         if not simulate_collection:
+            logger.info(
+                "payment.batch.settle.stk_collection_required batch_id=%s required_total_minor=%s",
+                batch.id,
+                required_total,
+            )
             return _queue_batch_wallet_collection(
                 batch,
                 actor,
@@ -2688,13 +2763,16 @@ def settle_batch(batch, actor, simulate_collection=True):
             )
 
     batch.instructions.update(status=PaymentInstruction.Status.SUCCEEDED, failure_reason="")
+    logger.info("payment.batch.settle.local_success batch_id=%s instruction_count=%s", batch.id, batch.instructions.count())
     _mark_batch_success(batch, actor=actor)
     return batch
 
 
 def mark_batch_collection_complete(batch, microservice_response):
     if batch.metadata.get("collection_status") == "SUCCEEDED" and batch.metadata.get("instruction_dispatch_queued_at"):
+        logger.info("payment.batch.collection.already_complete batch_id=%s", batch.id)
         return batch
+    logger.info("payment.batch.collection.complete batch_id=%s response_keys=%s", batch.id, sorted((microservice_response or {}).keys()))
     batch.metadata["collection_response"] = microservice_response
     batch.metadata["collection_status"] = "SUCCEEDED"
     batch.metadata["orchestration_stage"] = "WALLET_FUNDED_DISPATCHING_PAYOUTS"
@@ -2719,6 +2797,13 @@ def finalize_batch_from_instructions(batch):
         failed=Count("id", filter=Q(status=PaymentInstruction.Status.FAILED)),
         succeeded=Count("id", filter=Q(status=PaymentInstruction.Status.SUCCEEDED)),
     )
+    logger.info(
+        "payment.batch.finalize.evaluate batch_id=%s pending=%s succeeded=%s failed=%s",
+        batch.id,
+        summary["pending"],
+        summary["succeeded"],
+        summary["failed"],
+    )
     if summary["pending"]:
         return batch.status
     from_status = batch.status
@@ -2742,6 +2827,12 @@ def finalize_batch_from_instructions(batch):
             logger.warning("payment.batch.ledger_transaction_missing batch_id=%s transaction_id=%s", batch.id, ledger_transaction_id)
     batch.processed_at = timezone.now()
     batch.save(update_fields=["status", "processed_at", "updated_at"])
+    logger.info(
+        "payment.batch.finalize.complete batch_id=%s from_status=%s to_status=%s",
+        batch.id,
+        from_status,
+        batch.status,
+    )
     record_transaction_event(
         "payment_batch",
         batch.id,
@@ -2956,6 +3047,13 @@ def process_kplc_payout_notification(instruction_id):
 
 def record_instruction_success(instruction, microservice_response, microservice_request_id=""):
     from_status = instruction.status
+    logger.info(
+        "payment.instruction.success instruction_id=%s batch_id=%s from_status=%s microservice_request_id=%s",
+        instruction.id,
+        instruction.batch_id,
+        from_status,
+        microservice_request_id or instruction.microservice_request_id,
+    )
     instruction.status = PaymentInstruction.Status.SUCCEEDED
     instruction.failure_reason = ""
     instruction.microservice_request_id = microservice_request_id or instruction.microservice_request_id
@@ -2980,6 +3078,13 @@ def record_instruction_success(instruction, microservice_response, microservice_
 
 def record_instruction_failure(instruction, reason, microservice_response=None):
     from_status = instruction.status
+    logger.warning(
+        "payment.instruction.failure instruction_id=%s batch_id=%s from_status=%s reason=%s",
+        instruction.id,
+        instruction.batch_id,
+        from_status,
+        reason,
+    )
     instruction.status = PaymentInstruction.Status.FAILED
     instruction.failure_reason = reason[:255]
     instruction.microservice_response = microservice_response or {}

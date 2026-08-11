@@ -1,8 +1,10 @@
+import base64
 import json
 import logging
 import time
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from urllib import error, request
 from urllib.parse import urlparse
 from django.conf import settings
@@ -168,6 +170,15 @@ def _render_string(template, context):
     if not template:
         return ""
     return Template(template).render(Context(context or {}))
+
+
+def _brand_logo_data_uri():
+    logo_path = Path(__file__).resolve().parent.parent / "reports" / "static" / "reports" / "quickbills-logo.png"
+    try:
+        return "data:image/png;base64," + base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    except OSError:
+        logger.warning("notification.email.logo_missing path=%s", logo_path)
+        return ""
 
 
 def _local_day_bounds(value):
@@ -520,6 +531,8 @@ def _event_view_model(event):
 
     return {
         "brand_name": "QuickBills",
+        "brand_tagline": "Schedule bills, pay securely, stay ahead",
+        "logo_data_uri": _brand_logo_data_uri(),
         "title": title,
         "intro": intro,
         "badge": badge,

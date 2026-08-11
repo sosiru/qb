@@ -454,9 +454,18 @@ class QuickBillsPlatformTests(TestCase):
         response = self._post("/api/v1/wallets/topups/", {"amount_minor": 150000, "simulate": True}, token=token)
         self.assertEqual(response.status_code, 200)
 
-        response = self.client.get("/api/v1/wallets/ledger/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        response = self.client.get("/api/v1/wallets/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 200)
+        wallets = response.json()["wallets"]
+        self.assertTrue(wallets[0]["account_number"])
+
+        response = self.client.get("/api/v1/wallets/ledger/?limit=1&offset=0", HTTP_AUTHORIZATION=f"Bearer {token}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["entries"]), 1)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["limit"], 1)
+        self.assertEqual(response.json()["offset"], 0)
+        self.assertFalse(response.json()["has_next"])
         entry = response.json()["entries"][0]
         self.assertEqual(entry["entry_type"], "TOP_UP")
         self.assertEqual(entry["description"], "STK push wallet top-up")
@@ -1364,6 +1373,94 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
         self.assertEqual(event.status, OutboxEvent.Status.DONE)
         self.assertTrue(instruction.microservice_request_id.startswith("SIM-"))
+
+    @override_settings(
+        PAYMENT_MICROSERVICE_URL="https://payments.lipasync.com/api/v1/core",
+        PAYMENT_MICROSERVICE_SANDBOX=False,
+        PESAWAY_SYSTEM_SLUG="qb",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+    )
+    def test_live_wallet_payout_batch_stays_pending_and_debits_only_after_success_callback(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000022",
+                "password": "StrongPass123!",
+                "full_name": "Live Payout User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        token = response.json()["token"]
+        payee_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Live Allowance",
+                "payee_type": "MOBILE",
+                "phone_number": "254733333335",
+                "expense_category": "family",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+        self._post(
+            "/api/v1/schedules/",
+            {
+                "payee_id": payee_id,
+                "amount_minor": 100000,
+                "day_of_month": timezone.localdate().day,
+            },
+            token=token,
+        )
+        self._post("/api/v1/wallets/topups/", {"amount_minor": 200000, "simulate": True}, token=token)
+
+        with patch.object(
+            PaymentService,
+            "_post",
+            return_value={
+                "success": True,
+                "message": "Outbound transfer queued",
+                "data": {"outbound_transfer_id": "OUT-BATCH-PENDING-001", "status": "QUEUED"},
+            },
+        ):
+            response = self._post(
+                "/api/v1/payments/pay-all/",
+                {"payment_mode": "WALLET", "simulate_collection": False},
+                token=token,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["batch"]["status"], "PROCESSING")
+        self.assertEqual(response.json()["batch"]["lifecycle_status"], "DISBURSEMENT_PROCESSING")
+        batch = PaymentBatch.objects.get(id=response.json()["batch"]["id"])
+        instruction = PaymentInstruction.objects.get(batch=batch)
+        request = PaymentRequest.objects.get(request_id="OUT-BATCH-PENDING-001")
+        wallet = get_or_create_user_account(batch.user)
+        wallet.refresh_from_db()
+        self.assertEqual(instruction.status, PaymentInstruction.Status.PENDING)
+        self.assertEqual(request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(wallet.available_balance_minor, 200000)
+        self.assertEqual(wallet.current_balance_minor, 200000)
+        self.assertEqual(wallet.reserved_balance_minor, 0)
+
+        PaymentService().handle_webhook(
+            {
+                "event": "outbound_transfer.success",
+                "outbound_transfer_id": "OUT-BATCH-PENDING-001",
+                "status": "SUCCESS",
+                "external_reference": request.originator_ref,
+                "provider_transaction_id": "PHY-BATCH-001",
+            }
+        )
+
+        batch.refresh_from_db()
+        instruction.refresh_from_db()
+        request.refresh_from_db()
+        wallet.refresh_from_db()
+        self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
+        self.assertEqual(batch.status, PaymentBatch.Status.SUCCEEDED)
+        self.assertEqual(request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(wallet.available_balance_minor, 98000)
+        self.assertEqual(wallet.current_balance_minor, 98000)
+        self.assertEqual(wallet.reserved_balance_minor, 0)
 
     def test_successful_microservice_payout_queues_sms_and_email_with_sender_details(self):
         user = User.objects.create_user(

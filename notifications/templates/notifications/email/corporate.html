@@ -5,30 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }}</title>
   </head>
-  <body style="margin:0; padding:0; background:#f4f5f7; color:#2f3437; font-family:Arial, Helvetica, sans-serif;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7; padding:28px 12px;">
+  <body style="margin:0; padding:0; background:#eaf8ff; color:#06153a; font-family:Arial, Helvetica, sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eaf8ff; padding:32px 12px;">
       <tr>
         <td align="center">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 8px 24px rgba(18,24,26,0.08);">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px; background:#ffffff; border:1px solid #d9e1e8; border-radius:12px; overflow:hidden; box-shadow:0 14px 34px rgba(6,21,58,0.10);">
             <tr>
-              <td style="background:#0a4a38; padding:36px 28px; text-align:center;">
-                <div style="color:#ffffff; font-size:28px; line-height:1.2; font-weight:700; letter-spacing:-0.02em;">{{ brand_name }}</div>
-                <div style="margin-top:10px; color:#bfe7d5; font-size:12px; font-weight:700; letter-spacing:0.16em; text-transform:uppercase;">Simple, secure payments</div>
+              <td style="background:#ffffff; padding:28px 30px 18px; border-bottom:1px solid #e8eef3;">
+                {% if logo_data_uri %}
+                  <img src="{{ logo_data_uri }}" width="168" alt="{{ brand_name }}" style="display:block; width:168px; max-width:168px; height:auto; border:0; outline:none; text-decoration:none;">
+                {% else %}
+                  <div style="color:#06153a; font-size:24px; line-height:1.2; font-weight:700;">{{ brand_name }}</div>
+                {% endif %}
+                <div style="margin-top:8px; color:#64738a; font-size:11px; font-weight:700; letter-spacing:0.14em; text-transform:uppercase;">{{ brand_tagline }}</div>
               </td>
             </tr>
             <tr>
-              <td style="padding:38px 32px 32px;">
-                <div style="display:inline-block; padding:6px 10px; border-radius:999px; background:#eefaf3; color:#0d6b4f; font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase;">{{ badge }}</div>
-                <h1 style="margin:18px 0 18px; color:#0a4a38; font-size:24px; line-height:1.25; font-weight:700;">{{ title }}</h1>
-                <p style="margin:0 0 16px; color:#33383a; font-size:16px; line-height:1.7;">Dear <strong>{{ user_name }}</strong>,</p>
-                <p style="margin:0; color:#33383a; font-size:16px; line-height:1.7;">{{ intro }}</p>
+              <td style="padding:34px 32px 30px;">
+                <div style="display:inline-block; padding:6px 10px; border-radius:8px; background:#f2fcf7; color:#008f68; font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase;">{{ badge }}</div>
+                <h1 style="margin:18px 0 16px; color:#06153a; font-size:24px; line-height:1.28; font-weight:700;">{{ title }}</h1>
+                <p style="margin:0 0 16px; color:#21345e; font-size:16px; line-height:1.65;">Dear <strong>{{ user_name }}</strong>,</p>
+                <p style="margin:0; color:#21345e; font-size:16px; line-height:1.65;">{{ intro }}</p>
 
                 {% if details %}
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px; border:2px solid #0f9468; border-radius:10px; overflow:hidden;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px; border:1px solid #d9e1e8; border-radius:10px; overflow:hidden; background:#f4fafe;">
                     {% for label, value in details %}
                       <tr>
-                        <td style="padding:15px 18px; border-bottom:1px solid #e5e0d3; color:#66706b; font-size:14px; font-weight:700;">{{ label }}</td>
-                        <td align="right" style="padding:15px 18px; border-bottom:1px solid #e5e0d3; color:#222829; font-size:14px; font-weight:700;">{{ value }}</td>
+                        <td style="padding:14px 16px; border-bottom:1px solid #e8eef3; color:#64738a; font-size:13px; font-weight:700;">{{ label }}</td>
+                        <td align="right" style="padding:14px 16px; border-bottom:1px solid #e8eef3; color:#06153a; font-size:13px; font-weight:700;">{{ value }}</td>
                       </tr>
                     {% endfor %}
                   </table>
@@ -36,15 +40,15 @@
 
                 {% if cta_url %}
                   <div style="margin-top:30px; text-align:center;">
-                    <a href="{{ cta_url }}" style="display:inline-block; background:#0a4a38; color:#ffffff; text-decoration:none; padding:13px 22px; border-radius:8px; font-weight:700; font-size:14px;">{{ cta_label }}</a>
+                    <a href="{{ cta_url }}" style="display:inline-block; background:#0a1f44; color:#ffffff; text-decoration:none; padding:13px 22px; border-radius:8px; font-weight:700; font-size:14px;">{{ cta_label }}</a>
                   </div>
                 {% endif %}
 
-                <p style="margin:30px 0 0; color:#66706b; font-size:13px; line-height:1.6;">Have a question or did not expect this message? Contact us at <a href="mailto:{{ support_email }}" style="color:#0d6b4f; font-weight:700;">{{ support_email }}</a>.</p>
+                <p style="margin:30px 0 0; color:#64738a; font-size:13px; line-height:1.6;">Have a question or did not expect this message? Contact us at <a href="mailto:{{ support_email }}" style="color:#008f68; font-weight:700;">{{ support_email }}</a>.</p>
               </td>
             </tr>
             <tr>
-              <td style="background:#f7f8f8; padding:18px 32px; color:#7c8580; font-size:12px; line-height:1.6;">
+              <td style="background:#f4fafe; padding:18px 32px; color:#64738a; font-size:12px; line-height:1.6; border-top:1px solid #e8eef3;">
                 Sent by {{ brand_name }} on {{ sent_at }}. This is an automatic message about your account.
               </td>
             </tr>

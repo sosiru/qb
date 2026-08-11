@@ -157,6 +157,7 @@ DEFAULT_PROFILES = {
     "ApprovePayIn": [["debit_account_uncleared", "credit_account_available"]],
     "InitiatePayout": [["debit_account_available", "credit_account_reserved"]],
     "ApprovePayout": [["debit_account_current", "debit_account_reserved"]],
+    "CompleteUnreservedPayout": [["debit_account_available", "debit_account_current"]],
     "FailPayout": [["debit_account_reserved", "credit_account_available"]],
     "WalletAdjustmentCredit": [["credit_account_current", "credit_account_available"]],
     "WalletAdjustmentDebit": [["debit_account_available", "debit_account_current"]],
@@ -469,9 +470,10 @@ def complete_pay_in(transaction_record, *, response_payload=None, receipt="", co
         return tx
 
 
-def initiate_payout(account, *, amount_minor, reference="", idempotency_key="", description="Payout", metadata=None):
+def initiate_payout(account, *, amount_minor, reference="", idempotency_key="", description="Payout", metadata=None, reserve=True):
     with transaction.atomic():
         locked = Account.objects.select_for_update().get(pk=account.pk)
+        metadata = {**(metadata or {}), "wallet_reserved_on_initiate": bool(reserve)}
         tx = create_processing_transaction(
             locked,
             transaction_type_name="WalletWithdrawal",
@@ -483,8 +485,9 @@ def initiate_payout(account, *, amount_minor, reference="", idempotency_key="", 
             description=description,
             metadata=metadata,
         )
-        execute_profile(tx, locked, amount_minor, "InitiatePayout", reference=tx.internal_reference, description=description)
-        locked.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
+        if reserve:
+            execute_profile(tx, locked, amount_minor, "InitiatePayout", reference=tx.internal_reference, description=description)
+            locked.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
         return tx
 
 
@@ -494,7 +497,9 @@ def complete_payout(transaction_record, *, response_payload=None, receipt="", co
         if tx.status == Transaction.Status.COMPLETED:
             return tx
         account = Account.objects.select_for_update().get(pk=tx.account_id)
-        execute_profile(tx, account, tx.amount_minor, "ApprovePayout", reference=tx.internal_reference, receipt=receipt, description=tx.description)
+        reserved_on_initiate = (tx.metadata or {}).get("wallet_reserved_on_initiate", True)
+        profile_name = "ApprovePayout" if reserved_on_initiate else "CompleteUnreservedPayout"
+        execute_profile(tx, account, tx.amount_minor, profile_name, reference=tx.internal_reference, receipt=receipt, description=tx.description)
         account.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
         tx.status = Transaction.Status.COMPLETED
         tx.transaction_receipt = receipt or tx.transaction_receipt
@@ -512,7 +517,8 @@ def fail_transaction(transaction_record, *, reason="", response_payload=None):
         if tx.status in {Transaction.Status.COMPLETED, Transaction.Status.FAILED}:
             return tx
         account = Account.objects.select_for_update().get(pk=tx.account_id)
-        if tx.direction == Transaction.Direction.PAY_OUT and account.reserved_balance_minor >= tx.amount_minor:
+        reserved_on_initiate = (tx.metadata or {}).get("wallet_reserved_on_initiate", True)
+        if tx.direction == Transaction.Direction.PAY_OUT and reserved_on_initiate and account.reserved_balance_minor >= tx.amount_minor:
             execute_profile(tx, account, tx.amount_minor, "FailPayout", reference=tx.internal_reference, description=reason or tx.description)
             account.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
         tx.status = Transaction.Status.FAILED
@@ -568,6 +574,13 @@ class PaymentService:
         self.timeout = timeout or getattr(settings, "PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", 30)
 
     def initiate_stk_push(self, account, *, amount_minor, phone_number, idempotency_key="", metadata=None):
+        logger.info(
+            "payment.stk_push.initiate account_id=%s amount_minor=%s sandbox=%s metadata_keys=%s",
+            account.id,
+            amount_minor,
+            self.sandbox,
+            sorted((metadata or {}).keys()),
+        )
         tx = initiate_pay_in(
             account,
             amount_minor=amount_minor,
@@ -599,6 +612,15 @@ class PaymentService:
     def initiate_payout(self, account, *, amount_minor, destination=None, idempotency_key="", metadata=None):
         if not self.sandbox:
             self._validate_lipasync_payout_destination(destination or {})
+        logger.info(
+            "payment.payout.initiate account_id=%s amount_minor=%s sandbox=%s destination_type=%s reserve_wallet=%s metadata_keys=%s",
+            account.id,
+            amount_minor,
+            self.sandbox,
+            (destination or {}).get("type") or (destination or {}).get("destination_type") or "",
+            self.sandbox,
+            sorted((metadata or {}).keys()),
+        )
         tx = initiate_payout(
             account,
             amount_minor=amount_minor,
@@ -606,6 +628,7 @@ class PaymentService:
             idempotency_key=idempotency_key,
             description="Payout",
             metadata={**(metadata or {}), "destination": destination or {}},
+            reserve=self.sandbox,
         )
         return self._create_or_submit_request(
             tx,
@@ -618,6 +641,15 @@ class PaymentService:
         destination = instruction.destination or {}
         if not self.sandbox:
             self._validate_lipasync_payout_destination(destination)
+        logger.info(
+            "payment.instruction_payout.initiate instruction_id=%s batch_id=%s amount_minor=%s recipient_type=%s sandbox=%s uses_existing_transaction=%s",
+            instruction.id,
+            instruction.batch_id,
+            instruction.amount_minor,
+            instruction.recipient_type,
+            self.sandbox,
+            transaction_record is not None,
+        )
         if transaction_record is None:
             account = instruction.batch.organization.billing_accounts.first() if instruction.batch.organization_id else instruction.batch.user.billing_accounts.first()
             tx = initiate_payout(
@@ -627,6 +659,7 @@ class PaymentService:
                 idempotency_key=idempotency_key,
                 description=f"Payout to {instruction.recipient_name}",
                 metadata={**(metadata or {}), "instruction_id": str(instruction.id), "batch_id": str(instruction.batch_id)},
+                reserve=self.sandbox,
             )
         else:
             tx = transaction_record
@@ -649,6 +682,14 @@ class PaymentService:
         originator_ref = originator_ref or tx.internal_reference
         metadata = metadata or tx.metadata or {}
         request_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
+        logger.info(
+            "payment.request.prepare transaction_id=%s operation=%s originator_ref=%s amount_minor=%s sandbox=%s",
+            tx.id,
+            operation,
+            originator_ref,
+            request_amount_minor,
+            self.sandbox,
+        )
         if self.sandbox:
             provider_path = ""
             provider_payload = {
@@ -688,6 +729,14 @@ class PaymentService:
             sandbox=self.sandbox,
             request_payload=stored_payload,
         )
+        logger.info(
+            "payment.request.created payment_request_id=%s transaction_id=%s operation=%s provider_path=%s sandbox=%s",
+            payment_request.id,
+            tx.id,
+            operation,
+            provider_path or "sandbox",
+            self.sandbox,
+        )
         if self.sandbox:
             response_payload = {
                 "success": True,
@@ -699,11 +748,31 @@ class PaymentService:
             payment_request.request_id = response_payload["request_id"]
             payment_request.response_payload = response_payload
             payment_request.save(update_fields=["request_id", "response_payload", "updated_at"])
+            logger.info(
+                "payment.request.sandbox_callback payment_request_id=%s request_id=%s originator_ref=%s",
+                payment_request.id,
+                payment_request.request_id,
+                originator_ref,
+            )
             self.handle_webhook(response_payload)
             payment_request.refresh_from_db()
             return payment_request
+        logger.info(
+            "payment.request.submit payment_request_id=%s operation=%s provider_path=%s originator_ref=%s",
+            payment_request.id,
+            operation,
+            provider_path,
+            originator_ref,
+        )
         response_payload = self._post(provider_path, provider_payload)
         normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
+        logger.info(
+            "payment.request.submitted payment_request_id=%s provider_request_id=%s normalized_status=%s terminal=%s",
+            payment_request.id,
+            normalized_payload.get("request_id") or "",
+            normalized_payload.get("status") or "",
+            "success" in normalized_payload,
+        )
         payment_request.response_payload = response_payload
         payment_request.request_id = normalized_payload.get("request_id") or ""
         payment_request.save(update_fields=["response_payload", "request_id", "updated_at"])
@@ -715,12 +784,26 @@ class PaymentService:
         return payment_request
 
     def query_status(self, payment_request):
+        logger.info(
+            "payment.status_query.start payment_request_id=%s operation=%s request_id=%s originator_ref=%s",
+            payment_request.id,
+            payment_request.operation,
+            payment_request.request_id,
+            payment_request.originator_ref,
+        )
         if self._is_pesaway_core() and payment_request.operation == PaymentRequest.Operation.PAYOUT and payment_request.request_id:
             response_payload = self._get(f"/outbound-transfers/{payment_request.request_id}/status/")
             payment_request.last_query_at = timezone.now()
             payment_request.response_payload = response_payload
             payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
             normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
+            logger.info(
+                "payment.status_query.result payment_request_id=%s request_id=%s status=%s terminal=%s",
+                payment_request.id,
+                payment_request.request_id,
+                normalized_payload.get("status") or "",
+                normalized_payload.get("status") in (self.LIPASYNC_SUCCESS_STATUSES | self.LIPASYNC_FAILURE_STATUSES),
+            )
             if normalized_payload.get("status") in (
                 self.LIPASYNC_SUCCESS_STATUSES | self.LIPASYNC_FAILURE_STATUSES
             ):
@@ -732,6 +815,13 @@ class PaymentService:
         payment_request.response_payload = response_payload
         payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
         normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
+        logger.info(
+            "payment.status_query.result payment_request_id=%s request_id=%s status=%s terminal=%s",
+            payment_request.id,
+            payment_request.request_id,
+            normalized_payload.get("status") or "",
+            normalized_payload.get("status") in (self.LIPASYNC_SUCCESS_STATUSES | self.LIPASYNC_FAILURE_STATUSES),
+        )
         if normalized_payload.get("status") in (
             self.LIPASYNC_SUCCESS_STATUSES | self.LIPASYNC_FAILURE_STATUSES
         ):
@@ -743,6 +833,14 @@ class PaymentService:
         normalized_payload = self._normalize_microservice_payload(payload)
         originator_ref = normalized_payload.get("originator_ref") or ""
         request_id = normalized_payload.get("request_id") or ""
+        logger.info(
+            "payment.webhook.received originator_ref=%s request_id=%s status=%s has_terminal_success=%s event=%s",
+            originator_ref,
+            request_id,
+            normalized_payload.get("status") or "",
+            "success" in normalized_payload,
+            payload.get("event") or "",
+        )
         if not originator_ref and not request_id:
             raise LedgerError("originator_ref or request_id is required.")
         lookup = {"originator_ref": originator_ref} if originator_ref else {"request_id": request_id}
@@ -758,6 +856,12 @@ class PaymentService:
             PaymentRequest.Status.COMPLETED,
             PaymentRequest.Status.FAILED,
         }:
+            logger.info(
+                "payment.webhook.ignored_terminal payment_request_id=%s status=%s transaction_id=%s",
+                payment_request.id,
+                payment_request.status,
+                tx.id,
+            )
             return payment_request
         request_payload = payment_request.request_payload or {}
         request_metadata = request_payload.get("metadata") or {}
@@ -768,12 +872,27 @@ class PaymentService:
             else ""
         )
         if "success" not in payload:
+            logger.info(
+                "payment.webhook.pending payment_request_id=%s transaction_id=%s operation=%s status=%s",
+                payment_request.id,
+                tx.id,
+                payment_request.operation,
+                payload.get("status") or "",
+            )
             payment_request.response_payload = payload
             payment_request.last_error = ""
             payment_request.save(update_fields=["request_id", "last_error", "response_payload", "updated_at"])
             return payment_request
         success = bool(payload.get("success"))
         if success:
+            logger.info(
+                "payment.webhook.success payment_request_id=%s transaction_id=%s operation=%s instruction_id=%s batch_collection_id=%s",
+                payment_request.id,
+                tx.id,
+                payment_request.operation,
+                instruction_id or "",
+                batch_collection_id or "",
+            )
             if instruction_id:
                 from base.models import PaymentInstruction
                 from base.services import record_instruction_success
@@ -818,6 +937,15 @@ class PaymentService:
             payment_request.last_error = ""
         else:
             reason = str(payload.get("failure_reason") or payload.get("message") or payload.get("error") or "Payment failed")
+            logger.warning(
+                "payment.webhook.failure payment_request_id=%s transaction_id=%s operation=%s instruction_id=%s batch_collection_id=%s reason=%s",
+                payment_request.id,
+                tx.id,
+                payment_request.operation,
+                instruction_id or "",
+                batch_collection_id or "",
+                reason,
+            )
             if instruction_id:
                 from base.models import PaymentInstruction
                 from base.services import record_instruction_failure
@@ -924,15 +1052,18 @@ class PaymentService:
         return headers
 
     def _post(self, path, payload):
-        logger.info("Starting POST request.")
+        logger.info("payment.http.post.start path=%s", path)
         if not self.base_url:
             logger.error("PAYMENT_MICROSERVICE_URL is not configured.")
             raise LedgerError("PAYMENT_MICROSERVICE_URL is not configured.")
         url = f"{self.base_url}{path}"
         headers = self._headers()
-        logger.info("POST URL: %s", url)
-        logger.info("Headers: %s", headers)
-        logger.info("Payload: %s", payload)
+        logger.info(
+            "payment.http.post.request url=%s has_api_key=%s payload_keys=%s",
+            url,
+            bool(headers.get("X-Api-Key") or headers.get("Authorization")),
+            sorted(payload.keys()),
+        )
         try:
             response = requests.post(
                 url,
@@ -940,10 +1071,10 @@ class PaymentService:
                 headers=headers,
                 timeout=self.timeout,
             )
-            logger.info("Response status: %s", response.status_code)
+            logger.info("payment.http.post.response_status url=%s status_code=%s", url, response.status_code)
             response.raise_for_status()
             result = response.json()
-            logger.info("Response body: %s", result)
+            logger.info("payment.http.post.response_body url=%s body=%s", url, result)
             return result
         except requests.HTTPError:
             logger.exception(
@@ -957,24 +1088,27 @@ class PaymentService:
             raise LedgerError(str(e))
 
     def _get(self, path):
-        logger.info("Starting GET request.")
+        logger.info("payment.http.get.start path=%s", path)
         if not self.base_url:
             logger.error("PAYMENT_MICROSERVICE_URL is not configured.")
             raise LedgerError("PAYMENT_MICROSERVICE_URL is not configured.")
         url = f"{self.base_url}{path}"
         headers = self._headers()
-        logger.info("GET URL: %s", url)
-        logger.info("Headers: %s", headers)
+        logger.info(
+            "payment.http.get.request url=%s has_api_key=%s",
+            url,
+            bool(headers.get("X-Api-Key") or headers.get("Authorization")),
+        )
         try:
             response = requests.get(
                 url,
                 headers=headers,
                 timeout=self.timeout,
             )
-            logger.info("Response status: %s", response.status_code)
+            logger.info("payment.http.get.response_status url=%s status_code=%s", url, response.status_code)
             response.raise_for_status()
             result = response.json()
-            logger.info("Response body: %s", result)
+            logger.info("payment.http.get.response_body url=%s body=%s", url, result)
             return result
         except requests.HTTPError:
             logger.exception(
@@ -1034,6 +1168,14 @@ class PaymentService:
             phone_number = str(extra_payload.get("phone_number") or "").strip()
             if not phone_number:
                 raise LedgerError("PesaWay collection requires provider_payload.phone_number.")
+            channel = self._pesaway_mobile_channel(extra_payload.get("channel"))
+            logger.info(
+                "payment.pesaway.route operation=%s transaction_id=%s event_slug=%s channel=%s",
+                operation,
+                tx.id,
+                event_slug,
+                channel,
+            )
             return (
                 f"/inbound-payments/{system_slug}/{event_slug}/initiate/",
                 {
@@ -1042,7 +1184,7 @@ class PaymentService:
                     "external_reference": originator_ref,
                     "provider_payload": {
                         "phone_number": phone_number,
-                        "channel": self._pesaway_mobile_channel(extra_payload.get("channel")),
+                        "channel": channel,
                         "reason": extra_payload.get("reason") or "Wallet top-up",
                     },
                 },
@@ -1053,6 +1195,14 @@ class PaymentService:
                 recipient_type=extra_payload.get("recipient_type") or "",
             )
             payout_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
+            logger.info(
+                "payment.pesaway.route operation=%s transaction_id=%s event_slug=%s amount_minor=%s provider_payload_keys=%s",
+                operation,
+                tx.id,
+                event_slug,
+                payout_amount_minor,
+                sorted(provider_payload.keys()),
+            )
             return (
                 f"/outbound-transfers/{system_slug}/{event_slug}/initiate/",
                 {
