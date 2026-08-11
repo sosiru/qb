@@ -73,13 +73,43 @@ class PesaWayEventConfig:
 
 
 class PesaWayPayoutRouter:
-    def __init__(self, destination, *, mobile_channel_validator):
+    def __init__(self, destination, *, recipient_type="", mobile_channel_validator):
         self.destination = destination or {}
+        self.recipient_type = str(recipient_type or "").upper()
         self.mobile_channel_validator = mobile_channel_validator
 
     def route(self):
-        destination_type = str(self.destination.get("type") or "").upper()
+        destination_type = str(self.destination.get("type") or self.recipient_type or "").upper()
         reason = self.destination.get("reason") or "QuickBills payout"
+
+        if destination_type in {"PAYBILL", "B2B_PAYBILL"}:
+            account_number = str(self.destination.get("paybill_number") or self.destination.get("account_number") or "").strip()
+            if not account_number:
+                raise LedgerError("PesaWay B2B Paybill payout requires provider_payload.account_number.")
+            return PesaWayEventConfig.b2b_event_slug(), {
+                "account_number": account_number,
+                "channel": "MPESA Paybill",
+                "reason": reason,
+            }
+        if destination_type in {"TILL", "B2B_TILL"}:
+            account_number = str(self.destination.get("till_number") or self.destination.get("account_number") or "").strip()
+            if not account_number:
+                raise LedgerError("PesaWay B2B Till payout requires provider_payload.account_number.")
+            return PesaWayEventConfig.b2b_event_slug(), {
+                "account_number": account_number,
+                "channel": "MPESA Till",
+                "reason": reason,
+            }
+        if destination_type in {"BANK", "BANK_TRANSFER"}:
+            account_number = str(self.destination.get("account_number") or "").strip()
+            bank_name = str(self.destination.get("bank_name") or "").strip()
+            if not account_number or not bank_name:
+                raise LedgerError("PesaWay bank payout requires provider_payload.account_number and provider_payload.bank_name.")
+            return PesaWayEventConfig.bank_event_slug(), {
+                "account_number": account_number,
+                "bank_name": bank_name,
+                "reason": reason,
+            }
         if self.destination.get("phone_number") or destination_type in {"MPESA", "MOBILE", "B2C"}:
             phone_number = str(self.destination.get("phone_number") or "").strip()
             if not phone_number:
@@ -888,7 +918,7 @@ class PaymentService:
             "Content-Type": "application/json",
         }
         if self.api_key:
-            headers["X-API-KEY"] = self.api_key
+            headers["X-Api-Key"] = self.api_key
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
@@ -908,6 +938,7 @@ class PaymentService:
                 url,
                 json=payload,
                 headers=headers,
+                timeout=self.timeout,
             )
             logger.info("Response status: %s", response.status_code)
             response.raise_for_status()
@@ -1017,7 +1048,10 @@ class PaymentService:
                 },
             )
         if operation == PaymentRequest.Operation.PAYOUT:
-            event_slug, provider_payload = self._pesaway_outbound_payload(extra_payload.get("destination") or {})
+            event_slug, provider_payload = self._pesaway_outbound_payload(
+                extra_payload.get("destination") or {},
+                recipient_type=extra_payload.get("recipient_type") or "",
+            )
             payout_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
             return (
                 f"/outbound-transfers/{system_slug}/{event_slug}/initiate/",
@@ -1030,9 +1064,10 @@ class PaymentService:
             )
         raise LedgerError(f"PesaWay does not support payment operation {operation}.")
 
-    def _pesaway_outbound_payload(self, destination):
+    def _pesaway_outbound_payload(self, destination, *, recipient_type=""):
         return PesaWayPayoutRouter(
             destination,
+            recipient_type=recipient_type,
             mobile_channel_validator=self._pesaway_mobile_channel,
         ).route()
 

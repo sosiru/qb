@@ -396,6 +396,57 @@ class LedgerServiceTests(TestCase):
                 self.assertNotIn("recipient_type", payload)
                 self.assertNotIn("payment_method_type", payload)
 
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="qb",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+        PESAWAY_B2B_EVENT_SLUG="b2b",
+    )
+    def test_pesaway_instruction_recipient_type_controls_outbound_route(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-TYPED"))
+        batch = PaymentBatch.objects.create(
+            batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+            status=PaymentBatch.Status.PROCESSING,
+            payment_mode=PaymentBatch.PaymentMode.WALLET,
+            user=self.user,
+            scheduled_for=timezone.localdate(),
+            total_amount_minor=50000,
+        )
+        instruction = PaymentInstruction.objects.create(
+            batch=batch,
+            recipient_name="Supplier Paybill",
+            recipient_type="PAYBILL",
+            destination={
+                "phone_number": "254700900001",
+                "paybill_number": "123456",
+                "account_reference": "ACC-1",
+            },
+            amount_minor=50000,
+        )
+
+        with patch.object(
+            PaymentService,
+            "_post",
+            return_value={"success": True, "data": {"outbound_transfer_id": "OUT-TYPED-001", "status": "QUEUED"}},
+        ) as post:
+            PaymentService(
+                sandbox=False,
+                base_url="https://payments.lipasync.com/api/v1/core",
+            ).initiate_instruction_payout(instruction)
+
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/outbound-transfers/qb/b2b/initiate/")
+        self.assertEqual(
+            payload["provider_payload"],
+            {
+                "account_number": "123456",
+                "channel": "MPESA Paybill",
+                "reason": "QuickBills payout",
+            },
+        )
+        self.assertNotIn("currency", payload)
+        self.assertNotIn("recipient_type", payload)
+        self.assertNotIn("payment_method_type", payload)
+
     @override_settings(PESAWAY_SYSTEM_SLUG="qb", PESAWAY_B2C_EVENT_SLUG="b2c")
     def test_pesaway_rejects_invalid_mobile_channel(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-CHANNEL"))
@@ -443,7 +494,7 @@ class LedgerServiceTests(TestCase):
 
         for call in (get.call_args, post.call_args):
             headers = call.kwargs["headers"]
-            self.assertEqual(headers["X-API-KEY"], "pesaway-api-key")
+            self.assertEqual(headers["X-Api-Key"], "pesaway-api-key")
             self.assertNotIn("Authorization", headers)
 
     @override_settings(
