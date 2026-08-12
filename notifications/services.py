@@ -5,7 +5,6 @@ import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
-from urllib import error, request
 from urllib.parse import urlparse
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
@@ -13,6 +12,7 @@ from django.db import transaction
 from django.template.loader import render_to_string
 from django.template import Template, Context
 from django.utils import timezone
+import requests
 
 from base.models import PaymentSchedule
 from ledger.models import Account
@@ -29,7 +29,7 @@ class NotificationDispatchError(Exception):
 class NotificationInterface:
     def __init__(self, *, base_url=None, api_key=None, timeout=None):
         self.base_url = base_url or settings.NOTIFY_URL
-        self.api_key = "QWIRa-lvoNzOZwyW55hHNMsYclxIYBEP2XOaNjDeY6GnLNeWySks_g"
+        self.api_key = api_key or settings.NOTIFY_API_KEY
         self.timeout = timeout or settings.NOTIFY_TIMEOUT_SECONDS
 
     def send_sms(self, message, recipients, *, unique_identifier=None, template=None):
@@ -70,29 +70,33 @@ class NotificationInterface:
         }
         logger.info("Payload prepared: %s", payload)
         headers = {
-            "Content-Type": "application/json",
             "X-API-KEY": self.api_key,
+            "User-Agent": "QuickBills/1.0",
         }
         logger.info("Sending POST request to %s", self.base_url)
-        data = json.dumps(payload).encode("utf-8")
-        req = request.Request(self.base_url, data=data, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
-                status_code = getattr(response, "status", None)
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+            status_code = response.status_code
+            body = response.text
+            response.raise_for_status()
             logger.info("Response received. Status code: %s", status_code)
             result = json.loads(body or "{}")
             logger.info("Notification sent successfully. Response: %s", result)
             return result
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+        except requests.HTTPError as exc:
+            body = exc.response.text if exc.response is not None else ""
             logger.exception(
                 "HTTP error while sending notification. Status: %s, Body: %s",
-                exc.code,
+                exc.response.status_code if exc.response is not None else None,
                 body,
             )
             raise NotificationDispatchError(body or str(exc))
-        except (error.URLError, OSError) as e:
+        except requests.RequestException as e:
             logger.exception("Network error while sending notification.")
             raise NotificationDispatchError(str(e))
         except Exception:

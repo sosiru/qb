@@ -1793,27 +1793,24 @@ class QuickBillsPlatformTests(TestCase):
         sent_payloads = []
 
         class FakeResponse:
-            def __enter__(self):
-                return self
+            status_code = 200
+            text = '{"status":"queued"}'
 
-            def __exit__(self, exc_type, exc, tb):
-                return False
+            def raise_for_status(self):
+                return None
 
-            def read(self):
-                return b'{"status":"queued"}'
-
-        def fake_urlopen(req, timeout):
+        def fake_post(url, headers=None, json=None, timeout=None):
             sent_payloads.append(
                 {
-                    "url": req.full_url,
-                    "headers": dict(req.header_items()),
-                    "body": json.loads(req.data.decode("utf-8")),
+                    "url": url,
+                    "headers": headers,
+                    "body": json,
                     "timeout": timeout,
                 }
             )
             return FakeResponse()
 
-        with patch("notifications.services.request.urlopen", side_effect=fake_urlopen):
+        with patch("notifications.services.requests.post", side_effect=fake_post):
             call_command("process_notifications")
 
         self.assertEqual(len(sent_payloads), 2)
@@ -1824,7 +1821,7 @@ class QuickBillsPlatformTests(TestCase):
             "notification_type", "template", "unique_identifier", "recipients", "context"
         } for payload in sent_payloads))
         self.assertTrue(all(set(payload["body"]["context"]) == {"message"} for payload in sent_payloads))
-        self.assertTrue(all(payload["headers"].get("X-api-key") == "notify-key" for payload in sent_payloads))
+        self.assertTrue(all(payload["headers"].get("X-API-KEY") == "notify-key" for payload in sent_payloads))
         self.assertEqual(len(mail.outbox), 0)
 
     @override_settings(NOTIFY_URL="", NOTIFY_API_KEY="")
@@ -1971,20 +1968,17 @@ class QuickBillsPlatformTests(TestCase):
         sent_requests = []
 
         class FakeResponse:
-            def __enter__(self):
-                return self
+            status_code = 200
+            text = '{"status":"queued"}'
 
-            def __exit__(self, exc_type, exc, tb):
-                return False
+            def raise_for_status(self):
+                return None
 
-            def read(self):
-                return b'{"status":"queued"}'
-
-        def fake_urlopen(req, timeout):
+        def fake_post(url, headers=None, json=None, timeout=None):
             sent_requests.append(
                 {
-                    "body": json.loads(req.data.decode("utf-8")),
-                    "headers": dict(req.header_items()),
+                    "body": json,
+                    "headers": headers,
                 }
             )
             return FakeResponse()
@@ -1993,7 +1987,7 @@ class QuickBillsPlatformTests(TestCase):
             base_url="https://notify.example/api/send",
             api_key="notify-key",
         )
-        with patch("notifications.services.request.urlopen", side_effect=fake_urlopen):
+        with patch("notifications.services.requests.post", side_effect=fake_post):
             interface.send_sms(
                 "Your SMS message",
                 ["254700000099"],
@@ -2025,7 +2019,7 @@ class QuickBillsPlatformTests(TestCase):
             ],
         )
         self.assertTrue(
-            all(request_data["headers"].get("X-api-key") == "notify-key" for request_data in sent_requests)
+            all(request_data["headers"].get("X-API-KEY") == "notify-key" for request_data in sent_requests)
         )
 
     @override_settings(
@@ -2049,23 +2043,20 @@ class QuickBillsPlatformTests(TestCase):
         sent_channels = []
 
         class FakeResponse:
-            def __enter__(self):
-                return self
+            status_code = 200
+            text = '{"status":"queued"}'
 
-            def __exit__(self, exc_type, exc, tb):
-                return False
+            def raise_for_status(self):
+                return None
 
-            def read(self):
-                return b'{"status":"queued"}'
-
-        def fail_sms_only(req, timeout):
-            channel = json.loads(req.data.decode("utf-8"))["notification_type"]
+        def fail_sms_only(url, headers=None, json=None, timeout=None):
+            channel = json["notification_type"]
             sent_channels.append(channel)
             if channel == "sms":
                 raise OSError("SMS provider unavailable")
             return FakeResponse()
 
-        with patch("notifications.services.request.urlopen", side_effect=fail_sms_only):
+        with patch("notifications.services.requests.post", side_effect=fail_sms_only):
             call_command("process_notifications")
 
         sms_event = NotificationEvent.objects.get(channel="SMS", event_type="PAYMENT_SUCCESS")
