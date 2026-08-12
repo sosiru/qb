@@ -335,6 +335,43 @@ class QuickBillsPlatformTests(TestCase):
         events = NotificationEvent.objects.filter(event_type="LOGIN_OTP")
         self.assertEqual({event.channel for event in events}, {"EMAIL", "SMS"})
 
+    @override_settings(DEBUG=True)
+    def test_password_reset_uses_otp_and_revokes_existing_sessions(self):
+        user = User.objects.create_user(
+            phone_number="254700000199",
+            password="OldPass123!",
+            full_name="Reset User",
+            email="reset@example.com",
+            account_type="INDIVIDUAL",
+            sms_notifications_enabled=False,
+            email_notifications_enabled=False,
+        )
+        token_record, token = AccessToken.issue(user)
+
+        response = self._post("/api/v1/auth/password-reset/request/", {"phone_number": "0700000199"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["phone_number"], "254700000199")
+        dev_otp = response.json()["dev_otp"]
+        events = NotificationEvent.objects.filter(event_type="PASSWORD_RESET")
+        self.assertEqual({event.channel for event in events}, {"EMAIL", "SMS"})
+        self.assertIn(dev_otp, events.get(channel="SMS").context["message"])
+
+        response = self._post(
+            "/api/v1/auth/password-reset/confirm/",
+            {
+                "phone_number": "254700000199",
+                "otp": dev_otp,
+                "new_password": "NewPass123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password("NewPass123!"))
+        token_record.refresh_from_db()
+        self.assertIsNotNone(token_record.revoked_at)
+        response = self.client.get("/api/v1/auth/me/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 401)
+
     def test_registration_notification_queues_sms_and_email_even_when_preferences_are_disabled(self):
         user = User.objects.create_user(
             phone_number="254700000197",

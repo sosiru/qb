@@ -96,7 +96,7 @@ class NotificationInterface:
                 body,
             )
             raise NotificationDispatchError(body or str(exc))
-        except requests.RequestException as e:
+        except (requests.RequestException, OSError) as e:
             logger.exception("Network error while sending notification.")
             raise NotificationDispatchError(str(e))
         except Exception:
@@ -156,7 +156,7 @@ def _merge_context(template, context):
     return merged
 
 
-MANDATORY_AUTH_EVENT_TYPES = {"SELF_ONBOARDING", "LOGIN_OTP"}
+MANDATORY_AUTH_EVENT_TYPES = {"SELF_ONBOARDING", "LOGIN_OTP", "PASSWORD_RESET"}
 
 
 def _recipients_for_channel(user, channel, event_type=None):
@@ -361,6 +361,16 @@ def _event_view_model(event):
             ("Expires in", context.get("expires_in", "10 minutes")),
             ("Phone", context.get("phone_number", "")),
         ]
+    elif event.event_type == "PASSWORD_RESET":
+        title = "Reset your QuickBills password"
+        intro = "Enter this code to reset your QuickBills password. For your security, do not share it with anyone."
+        badge = "Password reset"
+        cta_label = "Reset password"
+        details = [
+            ("Reset code", context.get("otp", "")),
+            ("Expires in", context.get("expires_in", "10 minutes")),
+            ("Phone", context.get("phone_number", "")),
+        ]
     elif event.event_type == "LOGIN_SUCCESS":
         title = "New sign-in to your QuickBills account"
         intro = "Your QuickBills account was signed in to. If this was not you, change your password immediately."
@@ -553,7 +563,7 @@ def build_email_message(event):
     view_model = _event_view_model(event)
     subject_context = dict(event.context or {})
     subject_context.update(view_model)
-    subject = _render_string(event.template.subject_template, subject_context) or view_model["title"]
+    subject = _clean_text((event.context or {}).get("subject")) or _render_string(event.template.subject_template, subject_context) or view_model["title"]
     html_body = render_to_string("notifications/email/corporate.html", view_model)
     text_body = render_to_string("notifications/email/corporate.txt", view_model)
     return subject, text_body, html_body

@@ -61,6 +61,8 @@ from base.services import (
     OtpRequired,
     pay_individual_due_items,
     reject_batch,
+    request_password_reset,
+    reset_user_password,
     submit_batch_for_approval,
     top_up_wallet,
     transfer_to_vault,
@@ -604,6 +606,38 @@ def login_view(request):
         return _handle_domain_error(exc)
     _audit_auth_event(request, "auth.login.succeeded", user.phone_number, 200, actor=user)
     return JsonResponse({"user": _serialize_user(user), "token": token})
+
+
+@api_view
+def password_reset_request_view(request):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    payload = {}
+    try:
+        payload = get_request_data(request)
+        response = request_password_reset(payload)
+    except DomainError as exc:
+        attempted_phone = normalize_phone_number(payload.get("phone_number")) if payload.get("phone_number") else ""
+        _audit_auth_event(request, "auth.password_reset.request_failed", attempted_phone, 400, reason=str(exc))
+        return _handle_domain_error(exc)
+    _audit_auth_event(request, "auth.password_reset.requested", response.get("phone_number", ""), 200)
+    return JsonResponse(response)
+
+
+@api_view
+def password_reset_confirm_view(request):
+    if request.method != "POST":
+        return json_error("Method not allowed.", status=405)
+    payload = {}
+    try:
+        payload = get_request_data(request)
+        user = reset_user_password(payload)
+    except DomainError as exc:
+        attempted_phone = normalize_phone_number(payload.get("phone_number")) if payload.get("phone_number") else ""
+        _audit_auth_event(request, "auth.password_reset.failed", attempted_phone, 400, reason=str(exc))
+        return _handle_domain_error(exc)
+    _audit_auth_event(request, "auth.password_reset.succeeded", user.phone_number, 200, actor=user)
+    return JsonResponse({"status": "ok", "phone_number": user.phone_number})
 
 
 @api_view

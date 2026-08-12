@@ -557,31 +557,35 @@ def _generate_login_otp(phone_number):
     return f"{random.SystemRandom().randint(0, 99999):05d}"
 
 
-def _create_login_otp(user):
+def _create_user_otp(user, purpose):
     code = _generate_login_otp(user.phone_number)
     LoginOtp.objects.filter(
         user=user,
-        purpose=LoginOtp.Purpose.LOGIN,
+        purpose=purpose,
         consumed_at__isnull=True,
     ).update(consumed_at=timezone.now())
     LoginOtp.objects.create(
         user=user,
-        purpose=LoginOtp.Purpose.LOGIN,
+        purpose=purpose,
         code_hash=LoginOtp.hash_code(code),
         expires_at=timezone.now() + timedelta(minutes=LOGIN_OTP_TTL_MINUTES),
     )
-    logger.info("auth.otp.created user_id=%s phone=%s purpose=LOGIN", user.id, user.phone_number)
+    logger.info("auth.otp.created user_id=%s phone=%s purpose=%s", user.id, user.phone_number, purpose)
     if settings.DEBUG:
-        logger.info("auth.otp.dev_code user_id=%s phone=%s otp=%s", user.id, user.phone_number, code)
+        logger.info("auth.otp.dev_code user_id=%s phone=%s purpose=%s otp=%s", user.id, user.phone_number, purpose, code)
     return code
 
 
-def _verify_login_otp(user, code):
+def _create_login_otp(user):
+    return _create_user_otp(user, LoginOtp.Purpose.LOGIN)
+
+
+def _verify_user_otp(user, code, purpose):
     normalized_code = str(code or "").strip()
     otp = (
         LoginOtp.objects.filter(
             user=user,
-            purpose=LoginOtp.Purpose.LOGIN,
+            purpose=purpose,
             consumed_at__isnull=True,
         )
         .order_by("-created_at")
@@ -605,6 +609,10 @@ def _verify_login_otp(user, code):
     otp.consumed_at = timezone.now()
     otp.save(update_fields=["attempts", "consumed_at", "updated_at"])
     logger.info("auth.otp.verify.success user_id=%s phone=%s", user.id, user.phone_number)
+
+
+def _verify_login_otp(user, code):
+    return _verify_user_otp(user, code, LoginOtp.Purpose.LOGIN)
 
 
 def issue_integration_api_key(user, payload):
@@ -785,6 +793,88 @@ def login_user(payload):
     )
     logger.info("auth.login.success user_id=%s phone=%s", user.id, user.phone_number)
     return user, token
+
+
+def request_password_reset(payload):
+    phone_number = normalize_phone_number(payload.get("phone_number"))
+    logger.info("auth.password_reset.request.start phone=%s", phone_number)
+    if not phone_number:
+        raise ValidationError("phone_number is required.")
+
+    user = User.objects.filter(phone_number=phone_number, is_active=True).first()
+    if not user:
+        logger.info("auth.password_reset.request.unknown_phone phone=%s", phone_number)
+        return {
+            "phone_number": phone_number,
+            "otp_expires_in_seconds": LOGIN_OTP_TTL_MINUTES * 60,
+            "retry_after_seconds": LOGIN_OTP_RETRY_AFTER_SECONDS,
+        }
+
+    code = _create_user_otp(user, LoginOtp.Purpose.PASSWORD_RESET)
+    queue_notifications_for_user(
+        user,
+        "PASSWORD_RESET",
+        {
+            "user_name": user.full_name,
+            "phone_number": user.phone_number,
+            "otp": code,
+            "expires_in": f"{LOGIN_OTP_TTL_MINUTES} minutes",
+            "message": (
+                f"Your QuickBills password reset code is {code}. "
+                f"It expires in {LOGIN_OTP_TTL_MINUTES} minutes. Do not share it."
+            ),
+            "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
+        },
+        scheduled_for=timezone.now(),
+    )
+    logger.info("auth.password_reset.request.success user_id=%s phone=%s", user.id, user.phone_number)
+    response = {
+        "phone_number": user.phone_number,
+        "otp_expires_in_seconds": LOGIN_OTP_TTL_MINUTES * 60,
+        "retry_after_seconds": LOGIN_OTP_RETRY_AFTER_SECONDS,
+    }
+    if settings.DEBUG:
+        response["dev_otp"] = code
+    return response
+
+
+@transaction.atomic
+def reset_user_password(payload):
+    phone_number = normalize_phone_number(payload.get("phone_number"))
+    otp = payload.get("otp")
+    new_password = payload.get("new_password") or payload.get("password") or ""
+    logger.info("auth.password_reset.confirm.start phone=%s otp_present=%s", phone_number, bool(otp))
+    if not phone_number or not otp or not new_password:
+        raise ValidationError("phone_number, otp, and new_password are required.")
+    if len(new_password) < 8:
+        raise ValidationError("new_password must be at least 8 characters.")
+
+    user = User.objects.filter(phone_number=phone_number, is_active=True).first()
+    if not user:
+        raise ValidationError("Invalid or expired reset code.")
+
+    _verify_user_otp(user, otp, LoginOtp.Purpose.PASSWORD_RESET)
+    user.set_password(new_password)
+    user.save(update_fields=["password", "updated_at"])
+    AccessToken.objects.filter(user=user, revoked_at__isnull=True).update(revoked_at=timezone.now())
+    queue_notifications_for_user(
+        user,
+        "LOGIN_SUCCESS",
+        {
+            "user_name": user.full_name,
+            "phone_number": user.phone_number,
+            "login_time": timezone.localtime(timezone.now()).strftime("%d %b %Y, %I:%M %p"),
+            "subject": "Your QuickBills password was changed",
+            "title": "Your QuickBills password was changed",
+            "intro": "Your password was reset successfully. If this was not you, contact support immediately.",
+            "badge": "Password changed",
+            "cta_label": "Review your account",
+            "cta_url": getattr(settings, "FRONTEND_BASE_URL", "http://localhost:4200"),
+        },
+        scheduled_for=timezone.now(),
+    )
+    logger.info("auth.password_reset.confirm.success user_id=%s phone=%s", user.id, user.phone_number)
+    return user
 
 
 def update_user_profile(user, payload):

@@ -171,6 +171,7 @@ class AccessToken(TimestampedModel):
 class LoginOtp(TimestampedModel):
     class Purpose(models.TextChoices):
         LOGIN = "LOGIN", "Login"
+        PASSWORD_RESET = "PASSWORD_RESET", "Password Reset"
 
     id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
     user = models.ForeignKey("eusers.User", on_delete=models.CASCADE, related_name="login_otps")

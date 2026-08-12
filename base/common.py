@@ -16,6 +16,7 @@ NOTIFICATION_EVENT_TYPE_CHOICES = [
     ("BATCH_REJECTED", "Batch Rejected"),
     ("SELF_ONBOARDING", "Self Onboarding"),
     ("LOGIN_OTP", "Login OTP"),
+    ("PASSWORD_RESET", "Password Reset"),
     ("LOGIN_SUCCESS", "Login Success"),
     ("ORGANIZATION_INVITE", "Organization Invite"),
     ("WALLET_TOPUP_REQUESTED", "Wallet Topup Requested"),
