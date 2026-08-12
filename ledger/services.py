@@ -1046,7 +1046,7 @@ class PaymentService:
             "Content-Type": "application/json",
         }
         if self.api_key:
-            headers["X-Api-Key"] = self.api_key
+            headers["X-Api-Key"] = "sr9O83AjWau9JmbVoI12xpEFxqBOUcB1y3GMPk9LrOo"
             if not self._is_pesaway_core():
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
