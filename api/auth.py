@@ -118,16 +118,26 @@ def authenticate_request(request):
         raw_token = header.split(" ", 1)[1].strip()
         if raw_token:
             digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            jwt_payload = None
+            try:
+                jwt_payload = AccessToken.decode_jwt(raw_token)
+            except Exception:
+                logger.warning("auth.request.jwt.invalid path=%s", request.path)
             token = (
                 AccessToken.objects.select_related("user")
-                .filter(token_hash=digest, revoked_at__isnull=True)
+                .filter(
+                    **({"id": jwt_payload["sid"]} if jwt_payload and jwt_payload.get("sid") else {"token_hash": digest}),
+                    revoked_at__isnull=True,
+                )
                 .first()
             )
+            if jwt_payload and token and str(token.user_id) != str(jwt_payload.get("sub")):
+                token = None
             if token and token.is_active():
-                token.last_used_at = timezone.now()
-                token.save(update_fields=["last_used_at"])
+                token.extend_session()
                 request.auth_mode = "access_token"
                 request.integration_api_key = None
+                request.access_token = token
                 logger.info("auth.request.bearer.success path=%s user_id=%s", request.path, token.user_id)
                 return token.user
         logger.warning("auth.request.bearer.failed path=%s", request.path)

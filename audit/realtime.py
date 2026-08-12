@@ -1,4 +1,3 @@
-import hashlib
 import json
 from urllib.parse import parse_qs
 
@@ -79,10 +78,17 @@ class AuditFeedConsumer(WebsocketConsumer):
         raw_token = (query.get("token") or [""])[0].strip()
         if not raw_token:
             return None
-        digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-        token = AccessToken.objects.select_related("user").filter(token_hash=digest, revoked_at__isnull=True).first()
+        try:
+            payload = AccessToken.decode_jwt(raw_token)
+        except Exception:
+            payload = None
+        token_filter = {"id": payload["sid"]} if payload and payload.get("sid") else {"token_hash": AccessToken.hash_token(raw_token)}
+        token = AccessToken.objects.select_related("user").filter(**token_filter, revoked_at__isnull=True).first()
+        if payload and token and str(token.user_id) != str(payload.get("sub")):
+            return None
         if not token or not token.is_active():
             return None
+        token.extend_session()
         return token.user
 
     def _recent_events(self):

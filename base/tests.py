@@ -120,6 +120,27 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["categories"][0]["slug"], "internet")
 
+    def test_access_tokens_are_jwt_sessions_with_sliding_idle_expiry(self):
+        user = User.objects.create_user(
+            phone_number="254700000603",
+            password="StrongPass123!",
+            full_name="Session User",
+            account_type="INDIVIDUAL",
+        )
+        token_record, token = AccessToken.issue(user)
+        self.assertEqual(len(token.split(".")), 3)
+        first_expiry = token_record.expires_at
+
+        response = self.client.get("/api/v1/auth/me/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 200)
+        token_record.refresh_from_db()
+        self.assertGreater(token_record.expires_at, first_expiry)
+
+        token_record.expires_at = timezone.now() - timedelta(seconds=1)
+        token_record.save(update_fields=["expires_at", "updated_at"])
+        response = self.client.get("/api/v1/auth/me/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 401)
+
     def test_payee_category_must_be_predefined_slug(self):
         response = self._post(
             "/api/v1/auth/register/",

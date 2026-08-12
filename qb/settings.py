@@ -46,6 +46,9 @@ def _origin_from_url(url):
 
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-secret-key")
+JWT_SESSION_SECRET = os.environ.get("JWT_SESSION_SECRET", SECRET_KEY)
+ACCESS_TOKEN_IDLE_TIMEOUT_SECONDS = int(os.environ.get("ACCESS_TOKEN_IDLE_TIMEOUT_SECONDS", "300"))
+ACCESS_TOKEN_ABSOLUTE_TIMEOUT_SECONDS = int(os.environ.get("ACCESS_TOKEN_ABSOLUTE_TIMEOUT_SECONDS", str(30 * 24 * 60 * 60)))
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:4200")
 CSRF_ALLOWED_HOSTS = _env_list(
