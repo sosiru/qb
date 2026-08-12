@@ -1,6 +1,6 @@
 from django.db import models
 
-from base.common import TimestampedModel
+from base.common import TimestampedModel, json_safe
 from base.utils import generate_uuid
 
 
@@ -164,11 +164,11 @@ class Account(TimestampedModel):
     name = models.CharField(max_length=255, blank=True)
     currency = models.CharField(max_length=3, default="KES")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
-    current_balance_minor = models.BigIntegerField(default=0)
-    reserved_balance_minor = models.BigIntegerField(default=0)
-    available_balance_minor = models.BigIntegerField(default=0)
-    uncleared_balance_minor = models.BigIntegerField(default=0)
-    charge_balance_minor = models.BigIntegerField(default=0)
+    current_balance_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    reserved_balance_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    available_balance_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    uncleared_balance_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    charge_balance_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     metadata = models.JSONField(default=dict, blank=True)
     state = models.ForeignKey("ledger.State", on_delete=models.PROTECT, related_name="accounts")
 
@@ -205,6 +205,10 @@ class Account(TimestampedModel):
     def wallet_type(self):
         return self.account_kind
 
+    def save(self, *args, **kwargs):
+        self.metadata = json_safe(self.metadata or {})
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.account_number} {self.account_kind} {self.currency}"
 
@@ -231,7 +235,7 @@ class Transaction(TimestampedModel):
     transaction_receipt = models.CharField(max_length=120, blank=True)
     confirmation_key = models.CharField(max_length=255, blank=True)
     idempotency_key = models.CharField(max_length=128, blank=True)
-    amount_minor = models.BigIntegerField()
+    amount_minor = models.DecimalField(max_digits=14, decimal_places=2)
     currency = models.CharField(max_length=3, default="KES")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PROCESSING)
     source_ip = models.CharField(max_length=45, blank=True)
@@ -262,6 +266,12 @@ class Transaction(TimestampedModel):
     def reference(self):
         return self.internal_reference
 
+    def save(self, *args, **kwargs):
+        self.request_payload = json_safe(self.request_payload or {})
+        self.response_payload = json_safe(self.response_payload or {})
+        self.metadata = json_safe(self.metadata or {})
+        super().save(*args, **kwargs)
+
     @property
     def balance_after_minor(self):
         latest = self.balance_logs.order_by("-created_at").first()
@@ -282,8 +292,8 @@ class BalanceLog(TimestampedModel):
     balance_entry_type = models.ForeignKey("ledger.BalanceEntryType", on_delete=models.PROTECT, related_name="balance_logs")
     reference = models.CharField(max_length=100, blank=True)
     receipt = models.CharField(max_length=120, blank=True)
-    amount_transacted_minor = models.BigIntegerField()
-    total_balance_minor = models.BigIntegerField(default=0)
+    amount_transacted_minor = models.DecimalField(max_digits=14, decimal_places=2)
+    total_balance_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     description = models.TextField(blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
     state = models.ForeignKey("ledger.State", on_delete=models.PROTECT, related_name="balance_logs")
@@ -295,15 +305,19 @@ class BalanceLog(TimestampedModel):
     def __str__(self):
         return f"{self.transaction} {self.balance_entry_type} {self.amount_transacted_minor}"
 
+    def save(self, *args, **kwargs):
+        self.metadata = json_safe(self.metadata or {})
+        super().save(*args, **kwargs)
+
 
 class BalanceLogEntry(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
     balance_log = models.ForeignKey("ledger.BalanceLog", on_delete=models.CASCADE, related_name="entries")
     entry_type = models.ForeignKey("ledger.EntryType", on_delete=models.PROTECT, related_name="balance_log_entries")
     account_field_type = models.ForeignKey("ledger.AccountFieldType", on_delete=models.PROTECT, related_name="balance_log_entries")
-    amount_transacted_minor = models.BigIntegerField()
-    balance_before_minor = models.BigIntegerField()
-    balance_after_minor = models.BigIntegerField()
+    amount_transacted_minor = models.DecimalField(max_digits=14, decimal_places=2)
+    balance_before_minor = models.DecimalField(max_digits=14, decimal_places=2)
+    balance_after_minor = models.DecimalField(max_digits=14, decimal_places=2)
     state = models.ForeignKey("ledger.State", on_delete=models.PROTECT, related_name="balance_log_entries")
     metadata = models.JSONField(default=dict, blank=True)
 
@@ -312,6 +326,10 @@ class BalanceLogEntry(TimestampedModel):
 
     def __str__(self):
         return f"{self.balance_log} {self.account_field_type} {self.amount_transacted_minor}"
+
+    def save(self, *args, **kwargs):
+        self.metadata = json_safe(self.metadata or {})
+        super().save(*args, **kwargs)
 
 
 class PaymentRequest(TimestampedModel):
@@ -345,3 +363,8 @@ class PaymentRequest(TimestampedModel):
 
     def __str__(self):
         return f"{self.operation} {self.originator_ref}"
+
+    def save(self, *args, **kwargs):
+        self.request_payload = json_safe(self.request_payload or {})
+        self.response_payload = json_safe(self.response_payload or {})
+        super().save(*args, **kwargs)

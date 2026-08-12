@@ -494,7 +494,7 @@ class LedgerServiceTests(TestCase):
 
         for call in (get.call_args, post.call_args):
             headers = call.kwargs["headers"]
-            self.assertEqual(headers["X-Api-Key"], "pesaway-api-key")
+            self.assertEqual(headers["X-API-KEY"], "pesaway-api-key")
             self.assertNotIn("Authorization", headers)
 
     @override_settings(
@@ -739,6 +739,34 @@ class LedgerServiceTests(TestCase):
         self.assertIn("timed out after 300 seconds", payment_request.last_error)
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertIn("timed out after 300 seconds", tx.failure_reason)
+
+    def test_retry_stale_processing_waits_two_minutes_before_status_query(self):
+        tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-WAIT-001")
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.PAYOUT,
+            originator_ref="REQ-WAIT-001",
+            request_id="MS-PAYOUT-WAIT-001",
+            request_payload={
+                "originator_ref": "REQ-WAIT-001",
+                "amount_minor": 50000,
+                "currency": "KES",
+                "operation": PaymentRequest.Operation.PAYOUT,
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+        PaymentRequest.objects.filter(id=payment_request.id).update(
+            created_at=timezone.now() - timezone.timedelta(seconds=90)
+        )
+
+        with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
+            processed = PaymentService(sandbox=False, base_url="http://payments.example").retry_stale_processing()
+
+        self.assertEqual(processed, 0)
+        post.assert_not_called()
+        payment_request.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
 
     def test_pesaway_reconciliation_completes_successful_outbound_transfer(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-STATUS-001"))

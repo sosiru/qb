@@ -28,6 +28,22 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
+def _money_amount(value):
+    return Decimal(str(value or "0")).quantize(Decimal("0.01"))
+
+
+def _json_safe(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 class LedgerError(Exception):
     pass
 
@@ -298,16 +314,17 @@ class ProcessorBase:
         entry_type = get_named(EntryType, entry_type_name)
         model_field = FIELD_TO_ACCOUNT_ATTR[balance_type]
         balance_before = getattr(account, model_field)
-        signed_amount = int(amount_minor) if entry_type_name == "Cr" else -int(amount_minor)
+        amount_minor = _money_amount(amount_minor)
+        signed_amount = amount_minor if entry_type_name == "Cr" else -amount_minor
         balance_after = balance_before + signed_amount
         if balance_after < 0 and balance_type in {"Available", "Reserved", "Uncleared"}:
-            raise InsufficientLedgerFunds(account, int(amount_minor), balance_before)
+            raise InsufficientLedgerFunds(account, amount_minor, balance_before)
         setattr(account, model_field, balance_after)
         BalanceLogEntry.objects.create(
             balance_log=balance_log,
             entry_type=entry_type,
             account_field_type=field_type,
-            amount_transacted_minor=int(amount_minor),
+            amount_transacted_minor=amount_minor,
             balance_before_minor=balance_before,
             balance_after_minor=balance_after,
             state=get_state(COMPLETED),
@@ -368,10 +385,10 @@ def execute_profile(transaction_record, account, amount_minor, balance_entry_typ
         balance_entry_type=balance_entry_type,
         reference=reference,
         receipt=receipt,
-        amount_transacted_minor=int(amount_minor),
+        amount_transacted_minor=_money_amount(amount_minor),
         description=description,
         state=get_state(ACTIVE),
-        metadata=metadata or {},
+        metadata=_json_safe(metadata or {}),
     )
     try:
         for rule in profile.rules.filter(state__name=ACTIVE).order_by("order"):
@@ -405,7 +422,8 @@ def create_processing_transaction(
     request_payload=None,
     metadata=None,
 ):
-    if int(amount_minor) <= 0:
+    amount_minor = _money_amount(amount_minor)
+    if amount_minor <= 0:
         raise LedgerError("Transaction amount must be greater than zero.")
     ensure_ledger_defaults()
     transaction_type = get_named(TransactionType, transaction_type_name, simple_name=transaction_type_name)
@@ -413,7 +431,7 @@ def create_processing_transaction(
     if idempotency_key:
         existing = Transaction.objects.filter(account=account, idempotency_key=idempotency_key).first()
         if existing:
-            if existing.amount_minor != int(amount_minor) or existing.transaction_type_id != transaction_type.id:
+            if existing.amount_minor != amount_minor or existing.transaction_type_id != transaction_type.id:
                 raise IdempotencyConflict("Idempotency key was already used for a different transaction.")
             raise DuplicateLedgerOperation(existing)
     return Transaction.objects.create(
@@ -423,13 +441,13 @@ def create_processing_transaction(
         direction=direction,
         internal_reference=internal_reference or unique_transaction_reference(),
         idempotency_key=idempotency_key or "",
-        amount_minor=int(amount_minor),
+        amount_minor=amount_minor,
         currency=account.currency,
         status=Transaction.Status.PROCESSING,
-        request_payload=request_payload or {},
+        request_payload=_json_safe(request_payload or {}),
         description=description,
         state=get_state(ACTIVE),
-        metadata=metadata or {},
+        metadata=_json_safe(metadata or {}),
     )
 
 
@@ -552,7 +570,7 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
 
 
 class PaymentService:
-    STATUS_QUERY_AFTER_SECONDS = 60
+    STATUS_QUERY_AFTER_SECONDS = 120
     PROCESSING_TIMEOUT_SECONDS = 300
     LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "COMPLETED", "SETTLED", "SUCCESS"}
     LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED", "MANUAL_REVIEW"}
@@ -681,7 +699,7 @@ class PaymentService:
     def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None, metadata=None):
         originator_ref = originator_ref or tx.internal_reference
         metadata = metadata or tx.metadata or {}
-        request_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
+        request_amount_minor = _money_amount(extra_payload.get("amount_minor") or tx.amount_minor)
         logger.info(
             "payment.request.prepare transaction_id=%s operation=%s originator_ref=%s amount_minor=%s sandbox=%s",
             tx.id,
@@ -727,7 +745,7 @@ class PaymentService:
             operation=operation,
             originator_ref=originator_ref,
             sandbox=self.sandbox,
-            request_payload=stored_payload,
+            request_payload=_json_safe(stored_payload),
         )
         logger.info(
             "payment.request.created payment_request_id=%s transaction_id=%s operation=%s provider_path=%s sandbox=%s",
@@ -1046,8 +1064,9 @@ class PaymentService:
             "Content-Type": "application/json",
         }
         if self.api_key:
-            headers["X-Api-Key"] = "sr9O83AjWau9JmbVoI12xpEFxqBOUcB1y3GMPk9LrOo"
-            if not self._is_pesaway_core():
+            if self._is_pesaway_core():
+                headers["X-API-KEY"] = self.api_key
+            else:
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
@@ -1061,7 +1080,7 @@ class PaymentService:
         logger.info(
             "payment.http.post.request url=%s has_api_key=%s payload_keys=%s",
             url,
-            bool(headers.get("X-Api-Key") or headers.get("Authorization")),
+            bool(headers.get("X-API-KEY") or headers.get("Authorization")),
             sorted(payload.keys()),
         )
         try:
@@ -1097,7 +1116,7 @@ class PaymentService:
         logger.info(
             "payment.http.get.request url=%s has_api_key=%s",
             url,
-            bool(headers.get("X-Api-Key") or headers.get("Authorization")),
+            bool(headers.get("X-API-KEY") or headers.get("Authorization")),
         )
         try:
             response = requests.get(
@@ -1144,7 +1163,7 @@ class PaymentService:
             )
         if operation == PaymentRequest.Operation.PAYOUT:
             destination = extra_payload.get("destination") or {}
-            payout_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
+            payout_amount_minor = _money_amount(extra_payload.get("amount_minor") or tx.amount_minor)
             return (
                 "/b2b_paybill/initiate/",
                 {
@@ -1194,7 +1213,7 @@ class PaymentService:
                 extra_payload.get("destination") or {},
                 recipient_type=extra_payload.get("recipient_type") or "",
             )
-            payout_amount_minor = int(extra_payload.get("amount_minor") or tx.amount_minor)
+            payout_amount_minor = _money_amount(extra_payload.get("amount_minor") or tx.amount_minor)
             logger.info(
                 "payment.pesaway.route operation=%s transaction_id=%s event_slug=%s amount_minor=%s provider_payload_keys=%s",
                 operation,
@@ -1283,10 +1302,10 @@ class PaymentService:
         return normalized
 
     def _amount_major(self, amount_minor):
-        return float((Decimal(int(amount_minor)) / Decimal("100")).quantize(Decimal("0.01")))
+        return float(_money_amount(amount_minor))
 
     def _amount_major_string(self, amount_minor):
-        return str((Decimal(int(amount_minor)) / Decimal("100")).quantize(Decimal("0.01")))
+        return str(_money_amount(amount_minor))
 
     def _is_pesaway_core(self):
         return self.base_url.rstrip("/").endswith("/api/v1/core")

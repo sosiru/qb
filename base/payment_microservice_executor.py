@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 
 from django.conf import settings
 import requests
@@ -18,6 +19,10 @@ def _sandbox_enabled():
     return not bool(getattr(settings, "PAYMENT_MICROSERVICE_URL", ""))
 
 
+def _money_amount(value):
+    return Decimal(str(value or "0")).quantize(Decimal("0.01"))
+
+
 def request_collection_for_batch(batch_id, payload=None):
     payload = payload or {}
     logger.info("payment_executor.collection.start batch_id=%s payload_keys=%s", batch_id, sorted(payload.keys()))
@@ -25,7 +30,7 @@ def request_collection_for_batch(batch_id, payload=None):
     actor = batch.user or batch.approved_by or batch.submitted_by
     if not actor:
         raise PaymentDispatchError("STK collection requires a user, submitter, or approver phone number.")
-    amount_minor = int(payload.get("amount_minor") or batch.total_amount_minor + batch.fee_amount_minor)
+    amount_minor = _money_amount(payload.get("amount_minor") or batch.total_amount_minor + batch.fee_amount_minor)
     if amount_minor <= 0:
         raise PaymentDispatchError("STK collection amount must be greater than zero.")
     if batch.organization_id:

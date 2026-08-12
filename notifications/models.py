@@ -1,6 +1,6 @@
 from django.db import models
 
-from base.common import NOTIFICATION_CHANNEL_CHOICES, NOTIFICATION_EVENT_TYPE_CHOICES, TimestampedModel
+from base.common import NOTIFICATION_CHANNEL_CHOICES, NOTIFICATION_EVENT_TYPE_CHOICES, TimestampedModel, json_safe
 from base.utils import generate_uuid
 
 
@@ -20,6 +20,10 @@ class NotificationTemplate(TimestampedModel):
         constraints = [
             models.UniqueConstraint(fields=["event_type", "channel"], name="uniq_notification_template_event_channel"),
         ]
+
+    def save(self, *args, **kwargs):
+        self.default_context = json_safe(self.default_context or {})
+        super().save(*args, **kwargs)
 
 
 class NotificationEvent(TimestampedModel):
@@ -44,3 +48,8 @@ class NotificationEvent(TimestampedModel):
     provider_response = models.JSONField(default=dict, blank=True)
     attempts = models.PositiveIntegerField(default=0)
     last_error = models.CharField(max_length=255, blank=True)
+
+    def save(self, *args, **kwargs):
+        self.context = json_safe(self.context or {})
+        self.provider_response = json_safe(self.provider_response or {})
+        super().save(*args, **kwargs)

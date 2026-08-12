@@ -471,7 +471,11 @@ def dispatch_outbox_event_inline(event):
 
 
 def amount_minor_to_payment_amount(amount_minor):
-    return str((Decimal(amount_minor) / Decimal("100")).quantize(Decimal("0.01")))
+    return str(_money_amount(amount_minor))
+
+
+def _money_amount(value):
+    return Decimal(str(value or "0")).quantize(Decimal("0.01"))
 
 
 def build_microservice_request_id(prefix, entity_id):
@@ -1600,7 +1604,7 @@ def create_schedule(user, payload):
 
     schedule = PaymentSchedule.objects.create(
         payee=payee,
-        amount_minor=int(amount_minor),
+        amount_minor=_money_amount(amount_minor),
         day_of_month=int(day_of_month),
         interval_months=interval_months,
         next_due_date=next_due_date,
@@ -1663,7 +1667,7 @@ def update_schedule(user, schedule_id, payload):
         update_fields.append("payee")
 
     if "amount_minor" in payload:
-        amount_minor = int(payload.get("amount_minor") or 0)
+        amount_minor = _money_amount(payload.get("amount_minor"))
         if amount_minor <= 0:
             raise ValidationError("amount_minor must be greater than 0.")
         schedule.amount_minor = amount_minor
@@ -1822,7 +1826,7 @@ def list_schedules(user, organization_id=None, filters=None):
 
 
 def top_up_wallet(user, payload):
-    amount_minor = int(payload.get("amount_minor") or 0)
+    amount_minor = _money_amount(payload.get("amount_minor"))
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
     requested_wallet_type = payload.get("wallet_type", Account.AccountKind.PRIMARY)
@@ -1910,7 +1914,7 @@ def list_wallet_ledger(user, organization_id=None, filters=None):
 
 @transaction.atomic
 def transfer_to_vault(user, payload):
-    amount_minor = int(payload.get("amount_minor") or 0)
+    amount_minor = _money_amount(payload.get("amount_minor"))
     direction = (payload.get("direction") or "TO_VAULT").upper()
     if amount_minor <= 0:
         raise ValidationError("amount_minor must be greater than 0.")
@@ -1956,7 +1960,7 @@ def transfer_to_vault(user, payload):
 
 @transaction.atomic
 def withdraw_to_mpesa(user, payload):
-    amount_minor = int(payload.get("amount_minor") or 0)
+    amount_minor = _money_amount(payload.get("amount_minor"))
     logger.info(
         "payment.withdrawal.start user_id=%s amount_minor=%s simulate=%s",
         user.id,
@@ -2045,15 +2049,14 @@ def _build_destination_from_payee(payee):
 
 
 def calculate_payout_fee_amount_minor(amount_minor):
-    amount = Decimal(int(amount_minor or 0))
-    fee = (amount * Decimal(SERVICE_FEE_BPS) / Decimal(10000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    fee_minor = max(0, int(fee))
+    amount = _money_amount(amount_minor)
+    fee_minor = max(Decimal("0.00"), (amount * Decimal(SERVICE_FEE_BPS) / Decimal(10000)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     logger.info(
         "payment.fee.calculated amount_minor=%s fee_bps=%s fee_amount_minor=%s total_amount_minor=%s",
-        int(amount_minor or 0),
+        amount,
         SERVICE_FEE_BPS,
         fee_minor,
-        int(amount_minor or 0) + fee_minor,
+        amount + fee_minor,
     )
     return fee_minor
 
@@ -2098,7 +2101,8 @@ def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
     batch.status = PaymentBatch.Status.PROCESSING
     batch.metadata["orchestration_stage"] = "AWAITING_WALLET_FUNDING"
     batch.metadata["collection_status"] = "PROCESSING"
-    batch.metadata["collection_amount_minor"] = int(amount_minor)
+    amount_minor = _money_amount(amount_minor)
+    batch.metadata["collection_amount_minor"] = amount_minor
     batch.metadata["collection_reason"] = reason
     batch.metadata["collection_phone_number"] = phone_number
     batch.save(update_fields=["status", "metadata", "updated_at"])
@@ -2110,7 +2114,7 @@ def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
         from_status=from_status,
         to_status=batch.status,
         payload={
-            "amount_minor": int(amount_minor),
+            "amount_minor": amount_minor,
             "reason": reason,
             "phone_number": phone_number,
             "wallet_source": "PRIMARY",
@@ -2121,7 +2125,7 @@ def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
         aggregate_type="payment_batch",
         aggregate_id=batch.id,
         payload={
-            "amount_minor": int(amount_minor),
+            "amount_minor": amount_minor,
             "phone_number": phone_number,
             "reason": reason,
         },
@@ -2459,7 +2463,7 @@ def _create_instruction_from_row(batch, row):
     recipient_type = row.get("recipient_type")
     if recipient_type not in Payee.PayeeType.values:
         raise ValidationError(f"Invalid recipient_type in CSV row: {recipient_type}")
-    amount_minor = int(row.get("amount_minor") or 0)
+    amount_minor = _money_amount(row.get("amount_minor"))
     if amount_minor <= 0:
         raise ValidationError("CSV amount_minor must be greater than 0.")
     PaymentInstruction.objects.create(
@@ -3026,8 +3030,8 @@ def _notification_context_for_kplc(instruction, message):
         "kplc_message": message,
         "message": (
             "Payment completed.\n\n"
-            f"Amount: KES {instruction.amount_minor / 100:,.2f}\n"
-            f"Fee: KES {instruction.fee_amount_minor / 100:,.2f}\n"
+            f"Amount: KES {instruction.amount_minor:,.2f}\n"
+            f"Fee: KES {instruction.fee_amount_minor:,.2f}\n"
             f"KPLC Meter: {meter_number}\n"
             f"Reference: {reference}\n\n"
             f"KPLC Response:\n{message}"
@@ -3236,7 +3240,7 @@ def list_batches(user, organization_id=None, filters=None):
 
 
 def _quick_pay_recipient_rows(payload):
-    common_amount_minor = int(payload.get("amount_minor") or 0)
+    common_amount_minor = _money_amount(payload.get("amount_minor"))
     rows = []
     recipients = payload.get("recipients")
     if isinstance(recipients, list):
@@ -3501,8 +3505,8 @@ def _apply_ledger_status_filter(queryset, status):
 
 def _serialize_wallet_activity(entry, transaction_kind):
     metadata = entry.metadata or {}
-    fee_amount_minor = int(metadata.get("fee_amount_minor") or 0)
-    base_amount_minor = int(metadata.get("base_amount_minor") or entry.amount_minor - fee_amount_minor)
+    fee_amount_minor = _money_amount(metadata.get("fee_amount_minor"))
+    base_amount_minor = _money_amount(metadata.get("base_amount_minor") or entry.amount_minor - fee_amount_minor)
     signed_amount_minor = -entry.amount_minor if entry.direction == LedgerTransactionRecord.Direction.PAY_OUT else entry.amount_minor
     return {
         "id": str(entry.id),

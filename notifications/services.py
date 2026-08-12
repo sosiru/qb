@@ -4,6 +4,7 @@ import logging
 import time
 import uuid
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
 from django.conf import settings
@@ -284,8 +285,8 @@ def _notification_message(event):
 
 def _money_minor(value):
     try:
-        return f"KES {int(value or 0) / 100:,.2f}"
-    except (TypeError, ValueError):
+        return f"KES {Decimal(str(value or '0')).quantize(Decimal('0.01')):,.2f}"
+    except Exception:
         return "KES 0.00"
 
 

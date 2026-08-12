@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 
 NOTIFICATION_CHANNEL_CHOICES = [
@@ -26,6 +28,18 @@ NOTIFICATION_EVENT_TYPE_CHOICES = [
     ("OVERDUE_PAYMENT", "Overdue Payment"),
     ("PRODUCT_UPDATE", "Product Update"),
 ]
+
+
+def json_safe(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    return value
 
 
 class TimestampedModel(models.Model):

@@ -1,6 +1,6 @@
 from django.db import models
 
-from base.common import TimestampedModel
+from base.common import TimestampedModel, json_safe
 from base.utils import generate_uuid
 
 
@@ -24,10 +24,10 @@ ACTION_DESCRIPTIONS = {
     "payee.created": "Created payee {payee_label}.",
     "payee.updated": "Updated payee {payee_label} fields: {fields}.",
     "payee.deleted": "Deleted payee {payee_label}.",
-    "schedule.created": "Created payment schedule for {payee_label} worth {amount_minor} minor units.",
+    "schedule.created": "Created payment schedule for {payee_label} worth KES {amount_minor}.",
     "schedule.updated": "Updated payment schedule fields: {fields}.",
     "schedule.deleted": "Deleted payment schedule for {payee_label}.",
-    "wallet.withdrawal_requested": "Requested wallet withdrawal of {amount_minor} minor units to {phone_number}.",
+    "wallet.withdrawal_requested": "Requested wallet withdrawal of KES {amount_minor} to {phone_number}.",
     "individual_batch.pending_owner_approval": "Created individual payment batch requiring owner approval.",
     "quick_pay.pending_owner_approval": "Created quick pay batch requiring owner approval.",
     "batch.uploaded": "Uploaded payment batch {batch_description} with {instruction_count} instructions.",
@@ -95,6 +95,7 @@ class AuditLog(TimestampedModel):
     metadata = models.JSONField(default=dict, blank=True)
 
     def save(self, *args, **kwargs):
+        self.metadata = json_safe(self.metadata or {})
         if not self.description:
             self.description = build_audit_description(self.action, self.target_type, self.target_id, self.metadata)
         super().save(*args, **kwargs)

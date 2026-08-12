@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -455,9 +456,9 @@ def _serialize_organization_invite(invite, invite_link=None):
 
 def _serialize_ledger_entry(entry):
     metadata = entry.metadata or {}
-    fee_amount_minor = int(metadata.get("fee_amount_minor") or 0)
-    base_amount_minor = int(metadata.get("base_amount_minor") or entry.amount_minor - fee_amount_minor)
-    gross_amount_minor = int(metadata.get("gross_amount_minor") or entry.amount_minor)
+    fee_amount_minor = Decimal(str(metadata.get("fee_amount_minor") or "0")).quantize(Decimal("0.01"))
+    base_amount_minor = Decimal(str(metadata.get("base_amount_minor") or entry.amount_minor - fee_amount_minor)).quantize(Decimal("0.01"))
+    gross_amount_minor = Decimal(str(metadata.get("gross_amount_minor") or entry.amount_minor)).quantize(Decimal("0.01"))
     wallet = entry.account
     entry_type = metadata.get("entry_type") or entry.transaction_type.name
     amount_minor = -entry.amount_minor if entry.direction == LedgerTransactionRecord.Direction.PAY_OUT else entry.amount_minor

@@ -8,7 +8,7 @@ register = template.Library()
 
 @register.filter
 def money(amount_minor, keep_cents=False):
-    amount = Decimal(amount_minor or 0) / Decimal("100")
+    amount = Decimal(str(amount_minor or "0")).quantize(Decimal("0.01"))
     rendered = f"{amount:,.2f}"
     if not keep_cents and rendered.endswith(".00"):
         rendered = rendered[:-3]

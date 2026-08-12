@@ -4,11 +4,11 @@ from ledger.services import PaymentService
 
 
 class Command(BaseCommand):
-    help = "Query payment status after one minute and fail requests still pending after five minutes."
+    help = "Query payment status after two minutes and fail requests still pending after five minutes."
 
     def add_arguments(self, parser):
-        parser.add_argument("--query-after-seconds", type=int, default=60)
-        parser.add_argument("--timeout-seconds", type=int, default=300)
+        parser.add_argument("--query-after-seconds", type=int, default=PaymentService.STATUS_QUERY_AFTER_SECONDS)
+        parser.add_argument("--timeout-seconds", type=int, default=PaymentService.PROCESSING_TIMEOUT_SECONDS)
         parser.add_argument("--limit", type=int, default=50)
         parser.add_argument(
             "--query-status",

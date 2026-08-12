@@ -2,7 +2,7 @@ from django.db import models
 from django.template.defaultfilters import slugify
 from django.utils import timezone
 
-from base.common import TimestampedModel
+from base.common import TimestampedModel, json_safe
 from base.utils import generate_uuid
 
 
@@ -101,6 +101,10 @@ class IdempotencyRecord(TimestampedModel):
             models.UniqueConstraint(fields=["user", "key", "method", "path"], name="uniq_user_idempotency_scope"),
         ]
 
+    def save(self, *args, **kwargs):
+        self.response_body = json_safe(self.response_body or {})
+        super().save(*args, **kwargs)
+
 
 class TransactionEvent(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
@@ -118,6 +122,10 @@ class TransactionEvent(TimestampedModel):
             models.Index(fields=["aggregate_type", "aggregate_id", "created_at"], name="tx_event_aggregate_created"),
         ]
 
+    def save(self, *args, **kwargs):
+        self.payload = json_safe(self.payload or {})
+        super().save(*args, **kwargs)
+
 
 class ReconciliationException(TimestampedModel):
     class Status(models.TextChoices):
@@ -129,8 +137,8 @@ class ReconciliationException(TimestampedModel):
     source = models.CharField(max_length=64)
     reference = models.CharField(max_length=120)
     internal_reference = models.CharField(max_length=120, blank=True)
-    expected_amount_minor = models.BigIntegerField(null=True, blank=True)
-    actual_amount_minor = models.BigIntegerField(null=True, blank=True)
+    expected_amount_minor = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    actual_amount_minor = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=3, default="KES")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN)
     details = models.JSONField(default=dict, blank=True)
@@ -139,6 +147,10 @@ class ReconciliationException(TimestampedModel):
         constraints = [
             models.UniqueConstraint(fields=["source", "reference"], name="uniq_reconciliation_source_reference"),
         ]
+
+    def save(self, *args, **kwargs):
+        self.details = json_safe(self.details or {})
+        super().save(*args, **kwargs)
 
 
 class PayeePreset(TimestampedModel):
@@ -225,7 +237,7 @@ class Payee(TimestampedModel):
 class PaymentSchedule(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=generate_uuid, editable=False)
     payee = models.ForeignKey("base.Payee", on_delete=models.CASCADE, related_name="schedules")
-    amount_minor = models.BigIntegerField()
+    amount_minor = models.DecimalField(max_digits=14, decimal_places=2)
     day_of_month = models.PositiveSmallIntegerField()
     interval_months = models.PositiveSmallIntegerField(default=1)
     next_due_date = models.DateField(default=timezone.localdate)
@@ -280,8 +292,8 @@ class PaymentBatch(TimestampedModel):
     scheduled_for = models.DateField()
     description = models.CharField(max_length=255, blank=True)
     source_file_name = models.CharField(max_length=255, blank=True)
-    total_amount_minor = models.BigIntegerField(default=0)
-    fee_amount_minor = models.BigIntegerField(default=0)
+    total_amount_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    fee_amount_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     submitted_by = models.ForeignKey(
         "eusers.User",
         on_delete=models.SET_NULL,
@@ -301,6 +313,10 @@ class PaymentBatch(TimestampedModel):
     processed_at = models.DateTimeField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
+    def save(self, *args, **kwargs):
+        self.metadata = json_safe(self.metadata or {})
+        super().save(*args, **kwargs)
+
     def recalculate_totals(self):
         total = self.instructions.aggregate(total=models.Sum("amount_minor"))["total"] or 0
         self.total_amount_minor = total
@@ -319,14 +335,19 @@ class PaymentInstruction(TimestampedModel):
     recipient_name = models.CharField(max_length=255)
     recipient_type = models.CharField(max_length=16, choices=Payee.PayeeType.choices)
     destination = models.JSONField(default=dict)
-    amount_minor = models.BigIntegerField()
-    fee_amount_minor = models.BigIntegerField(default=0)
+    amount_minor = models.DecimalField(max_digits=14, decimal_places=2)
+    fee_amount_minor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     category = models.CharField(max_length=64, default="general")
     external_reference = models.CharField(max_length=120, blank=True)
     microservice_request_id = models.CharField(max_length=120, blank=True)
     microservice_response = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     failure_reason = models.CharField(max_length=255, blank=True)
+
+    def save(self, *args, **kwargs):
+        self.destination = json_safe(self.destination or {})
+        self.microservice_response = json_safe(self.microservice_response or {})
+        super().save(*args, **kwargs)
 
 
 class OutboxEvent(TimestampedModel):
@@ -345,6 +366,10 @@ class OutboxEvent(TimestampedModel):
     available_at = models.DateTimeField(default=timezone.now, db_index=True)
     last_error = models.CharField(max_length=255, blank=True)
     payload = models.JSONField(default=dict, blank=True)
+
+    def save(self, *args, **kwargs):
+        self.payload = json_safe(self.payload or {})
+        super().save(*args, **kwargs)
 
 
 class CircuitBreakerState(TimestampedModel):
