@@ -766,6 +766,7 @@ class PaymentService:
             payment_request.request_id = response_payload["request_id"]
             payment_request.response_payload = response_payload
             payment_request.save(update_fields=["request_id", "response_payload", "updated_at"])
+            self._sync_transaction_request_id(payment_request, tx, payment_request.request_id)
             logger.info(
                 "payment.request.sandbox_callback payment_request_id=%s request_id=%s originator_ref=%s",
                 payment_request.id,
@@ -794,6 +795,7 @@ class PaymentService:
         payment_request.response_payload = response_payload
         payment_request.request_id = normalized_payload.get("request_id") or ""
         payment_request.save(update_fields=["response_payload", "request_id", "updated_at"])
+        self._sync_transaction_request_id(payment_request, tx, payment_request.request_id)
         if "success" in normalized_payload and (
             operation != PaymentRequest.Operation.PAYOUT or normalized_payload["success"] is False
         ):
@@ -809,8 +811,12 @@ class PaymentService:
             payment_request.request_id,
             payment_request.originator_ref,
         )
-        if self._is_pesaway_core() and payment_request.operation == PaymentRequest.Operation.PAYOUT and payment_request.request_id:
-            response_payload = self._get(f"/outbound-transfers/{payment_request.request_id}/status/")
+        if self._is_pesaway_core() and payment_request.request_id:
+            if payment_request.operation == PaymentRequest.Operation.PAYOUT:
+                status_path = f"/outbound-transfers/{payment_request.request_id}/status/"
+            else:
+                status_path = f"/inbound-transfers/{payment_request.request_id}/status/"
+            response_payload = self._get(status_path)
             payment_request.last_query_at = timezone.now()
             payment_request.response_payload = response_payload
             payment_request.save(update_fields=["last_query_at", "response_payload", "updated_at"])
@@ -861,8 +867,7 @@ class PaymentService:
         )
         if not originator_ref and not request_id:
             raise LedgerError("originator_ref or request_id is required.")
-        lookup = {"originator_ref": originator_ref} if originator_ref else {"request_id": request_id}
-        payment_request = PaymentRequest.objects.select_for_update().select_related("transaction").get(**lookup)
+        payment_request = self._get_payment_request_for_webhook(originator_ref=originator_ref, request_id=request_id)
         tx = payment_request.transaction
         normalized_payload = self._normalize_microservice_payload(payload, payment_request=payment_request)
         payload = {**payload, **normalized_payload}
@@ -870,6 +875,7 @@ class PaymentService:
             payload.pop("success", None)
         if payment_request.request_id != request_id and request_id:
             payment_request.request_id = request_id
+        self._sync_transaction_request_id(payment_request, tx, request_id)
         if payment_request.status in {
             PaymentRequest.Status.COMPLETED,
             PaymentRequest.Status.FAILED,
@@ -989,6 +995,34 @@ class PaymentService:
         payment_request.save(update_fields=["request_id", "status", "last_error", "response_payload", "updated_at"])
         return payment_request
 
+    def _sync_transaction_request_id(self, payment_request, tx=None, request_id=""):
+        request_id = str(request_id or payment_request.request_id or "").strip()
+        if not request_id:
+            return
+        tx = tx or payment_request.transaction
+        if tx.request_id == request_id:
+            return
+        Transaction.objects.filter(pk=tx.pk).update(request_id=request_id, updated_at=timezone.now())
+        tx.request_id = request_id
+
+    def _get_payment_request_for_webhook(self, *, originator_ref="", request_id=""):
+        lookups = []
+        if originator_ref:
+            lookups.append({"originator_ref": originator_ref})
+        if request_id:
+            lookups.append({"request_id": request_id})
+        for lookup in lookups:
+            try:
+                return PaymentRequest.objects.select_for_update().select_related("transaction").get(**lookup)
+            except PaymentRequest.DoesNotExist:
+                continue
+        identifiers = []
+        if originator_ref:
+            identifiers.append(f"originator_ref={originator_ref}")
+        if request_id:
+            identifiers.append(f"request_id={request_id}")
+        raise LedgerError(f"Payment request not found for webhook ({', '.join(identifiers)}).")
+
     def fail_processing_request(self, payment_request, reason):
         payload = {
             **(payment_request.response_payload or {}),
@@ -1018,13 +1052,11 @@ class PaymentService:
         processed = 0
         for payment_request in requests:
             age_seconds = (now - payment_request.created_at).total_seconds()
-            pesaway_inbound = self._is_pesaway_core() and payment_request.operation != PaymentRequest.Operation.PAYOUT
             query_error = None
             if (
                 query_status
                 and not self.sandbox
                 and self._supports_status_query()
-                and not pesaway_inbound
                 and payment_request.request_id
             ):
                 try:
@@ -1262,9 +1294,11 @@ class PaymentService:
             "request_id": str(
                 payload.get("request_id")
                 or payload.get("payment_intent_id")
+                or payload.get("inbound_transfer_id")
                 or payload.get("inbound_payment_id")
                 or payload.get("outbound_transfer_id")
                 or data.get("payment_intent_id")
+                or data.get("inbound_transfer_id")
                 or data.get("inbound_payment_id")
                 or data.get("outbound_transfer_id")
                 or data.get("request_id")

@@ -165,6 +165,8 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.request_id, "PI-STK-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
         self.assertEqual(payment_request.request_payload["metadata"]["purpose"], "batch_collection")
+        payment_request.transaction.refresh_from_db()
+        self.assertEqual(payment_request.transaction.request_id, "PI-STK-001")
 
     @override_settings(
         PESAWAY_SYSTEM_SLUG="quickbills",
@@ -204,6 +206,8 @@ class LedgerServiceTests(TestCase):
         )
         self.assertEqual(payment_request.request_id, "IN-STK-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        payment_request.transaction.refresh_from_db()
+        self.assertEqual(payment_request.transaction.request_id, "IN-STK-001")
 
         PaymentService().handle_webhook(
             {
@@ -290,6 +294,8 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.request_id, "OUT-001")
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
         self.assertEqual(payment_request.response_payload, response_payload)
+        payment_request.transaction.refresh_from_db()
+        self.assertEqual(payment_request.transaction.request_id, "OUT-001")
 
     @override_settings(PESAWAY_SYSTEM_SLUG="quickbills", PESAWAY_B2C_EVENT_SLUG="b2c")
     def test_live_payout_submission_success_waits_for_callback(self):
@@ -319,6 +325,7 @@ class LedgerServiceTests(TestCase):
         self.account.refresh_from_db()
         self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
         self.assertEqual(payment_request.transaction.status, Transaction.Status.PROCESSING)
+        self.assertEqual(payment_request.transaction.request_id, "OUT-CALLBACK-001")
         self.assertEqual(self.account.available_balance_minor, 25000)
         self.assertEqual(self.account.reserved_balance_minor, 75000)
 
@@ -816,6 +823,99 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(tx.transaction_receipt, "PHY123456")
         self.assertEqual(self.account.available_balance_minor, 25000)
         self.assertEqual(self.account.reserved_balance_minor, 0)
+
+    def test_pesaway_outbound_callback_falls_back_to_transfer_id_when_external_reference_differs(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-CALLBACK-FALLBACK"))
+        tx = initiate_payout(self.account, amount_minor=2000, reference="PAYOUT-2002")
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.PAYOUT,
+            originator_ref="REQ-CALLBACK-FALLBACK-001",
+            request_id="c9e4ca95-be15-4ed7-8602-e6804491188c",
+            request_payload={
+                "originator_ref": "REQ-CALLBACK-FALLBACK-001",
+                "operation": PaymentRequest.Operation.PAYOUT,
+                "destination": {"phone_number": "254700900001"},
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+
+        PaymentService().handle_webhook(
+            {
+                "event": "outbound_transfer.success",
+                "amount": "20.000000",
+                "status": "SUCCESS",
+                "currency": "KES",
+                "failure_code": "",
+                "failure_reason": "",
+                "recipient_type": "B2C",
+                "external_reference": "PAYOUT-2002",
+                "payment_method_type": "MOBILE_MONEY",
+                "outbound_transfer_id": payment_request.request_id,
+                "outbound_transfer_event": "b2c",
+                "provider_transaction_id": "PHY45634696E6",
+            }
+        )
+
+        payment_request.refresh_from_db()
+        tx.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(tx.status, Transaction.Status.COMPLETED)
+        self.assertEqual(tx.transaction_receipt, "PHY45634696E6")
+        self.assertEqual(tx.request_id, "c9e4ca95-be15-4ed7-8602-e6804491188c")
+        self.assertEqual(self.account.reserved_balance_minor, 0)
+
+    def test_pesaway_reconciliation_completes_successful_inbound_transfer(self):
+        tx = initiate_pay_in(self.account, amount_minor=10200, reference="STK-QB-20260812-CC8D2997")
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.STK_PUSH,
+            originator_ref="STK-QB-20260812-CC8D2997",
+            request_id="fa15e460-414c-4b22-af19-6eb6406fcf83",
+            request_payload={
+                "originator_ref": "STK-QB-20260812-CC8D2997",
+                "operation": PaymentRequest.Operation.STK_PUSH,
+                "phone_number": "254700900001",
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+        PaymentRequest.objects.filter(id=payment_request.id).update(
+            created_at=timezone.now() - timezone.timedelta(minutes=4)
+        )
+        status_response = {
+            "success": True,
+            "message": "Inbound transfer retrieved",
+            "data": {
+                "inbound_payment_id": payment_request.request_id,
+                "status": "SETTLED",
+                "amount": "102.000000",
+                "currency": "KES",
+                "external_reference": payment_request.originator_ref,
+                "provider_transaction_id": "bfa91d56-2573-4ca0-b5f9-058a97eb7ea1",
+            },
+        }
+        interface = PaymentService(
+            sandbox=False,
+            base_url="https://payments.lipasync.com/api/v1/core",
+        )
+        with patch.object(interface, "_get", return_value=status_response) as get:
+            processed = interface.retry_stale_processing(query_status=True)
+
+        self.assertEqual(processed, 1)
+        get.assert_called_once_with(
+            f"/inbound-transfers/{payment_request.request_id}/status/"
+        )
+        payment_request.refresh_from_db()
+        tx.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.COMPLETED)
+        self.assertEqual(tx.status, Transaction.Status.COMPLETED)
+        self.assertEqual(tx.transaction_receipt, "bfa91d56-2573-4ca0-b5f9-058a97eb7ea1")
+        self.assertEqual(tx.request_id, "fa15e460-414c-4b22-af19-6eb6406fcf83")
+        self.assertEqual(self.account.available_balance_minor, 10200)
 
     def test_retry_stale_processing_does_not_query_lipasync_without_status_endpoint(self):
         tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-LIPASYNC-TIMEOUT-001")
