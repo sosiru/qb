@@ -3245,7 +3245,7 @@ def _quick_pay_recipient_rows(payload):
     recipients = payload.get("recipients")
     if isinstance(recipients, list):
         if len(recipients) > 1 and any(
-            not isinstance(recipient, dict) or not recipient.get("amount_minor")
+            not isinstance(recipient, dict) or not recipient.get("amount")
             for recipient in recipients
         ):
             raise ValidationError("Enter an amount for every selected bill.")
