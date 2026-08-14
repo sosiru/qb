@@ -3240,7 +3240,7 @@ def list_batches(user, organization_id=None, filters=None):
 
 
 def _quick_pay_recipient_rows(payload):
-    common_amount_minor = _money_amount(payload.get("amount_minor"))
+    common_amount_minor = _money_amount(payload.get("amount"))
     rows = []
     recipients = payload.get("recipients")
     if isinstance(recipients, list):
