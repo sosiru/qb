@@ -588,7 +588,7 @@ class PaymentService:
     def __init__(self, *, sandbox=None, base_url=None, api_key=None, timeout=None):
         self.sandbox = getattr(settings, "PAYMENT_MICROSERVICE_SANDBOX", True) if sandbox is None else sandbox
         self.base_url = (base_url or getattr(settings, "PAYMENT_MICROSERVICE_URL", "")).rstrip("/")
-        self.api_key = api_key or getattr(settings, "PAYMENT_MICROSERVICE_API_KEY", "")
+        self.api_key = "PsRdVR9pM4uZXGi-gSeTih7I7_vKwR1Mw_iN7exf2ko"
         self.timeout = timeout or getattr(settings, "PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", 30)
 
     def initiate_stk_push(self, account, *, amount_minor, phone_number, idempotency_key="", metadata=None):
