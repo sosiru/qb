@@ -16,7 +16,8 @@ The microservice calls QuickBills back with:
 ```env
 PAYMENT_MICROSERVICE_URL=http://localhost:8001
 PAYMENT_MICROSERVICE_API_KEY=dummy-payment-api-key
-PAYMENT_MICROSERVICE_TIMEOUT_SECONDS=30
+PAYMENT_MICROSERVICE_TIMEOUT_SECONDS=8
+PAYMENT_MICROSERVICE_INLINE_DISPATCH=0
 PAYMENT_CALLBACK_URL=https://qb.lipasync.com/api/v1/payments/webhook/
 PESAWAY_WEBHOOK_SECRET=replace-with-the-secret-from-pesaway
 ```

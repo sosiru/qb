@@ -17,7 +17,7 @@ COMMANDS = (
     "process_notifications",
     "reconcile_processing_payments",
 )
-INTERVAL_SECONDS = 60
+INTERVAL_SECONDS = int(os.environ.get("QUICKBILLS_BACKGROUND_COMMAND_INTERVAL_SECONDS", "10"))
 
 _started = False
 _lock = threading.Lock()

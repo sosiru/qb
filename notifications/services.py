@@ -265,6 +265,16 @@ def build_notification_payload(event):
         or (event.context or {}).get("body")
         or view_model["intro"]
     )
+    context = {"message": str(message)}
+    if event.channel == "EMAIL":
+        subject_context = dict(event.context or {})
+        subject_context.update(view_model)
+        subject = (
+            _clean_text((event.context or {}).get("subject"))
+            or _render_string(event.template.subject_template, subject_context)
+            or view_model["title"]
+        )
+        context["subject"] = str(subject)
     template = (
         settings.NOTIFY_EMAIL_TEMPLATE
         if event.channel == "EMAIL"
@@ -275,7 +285,7 @@ def build_notification_payload(event):
         "template": template,
         "unique_identifier": event.unique_identifier,
         "recipients": event.recipients,
-        "context": {"message": str(message)},
+        "context": context,
     }
 
 

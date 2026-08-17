@@ -1421,7 +1421,8 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(instruction.status, PaymentInstruction.Status.SUCCEEDED)
         self.assertTrue(instruction.microservice_request_id.startswith("SIM-"))
 
-    def test_microservice_enabled_wallet_flow_dispatches_inline_by_default(self):
+    @override_settings(PAYMENT_MICROSERVICE_INLINE_DISPATCH=True)
+    def test_microservice_enabled_wallet_flow_dispatches_inline_when_enabled(self):
         response = self._post(
             "/api/v1/auth/register/",
             {
@@ -1894,7 +1895,11 @@ class QuickBillsPlatformTests(TestCase):
         self.assertTrue(all(set(payload["body"]) == {
             "notification_type", "template", "unique_identifier", "recipients", "context"
         } for payload in sent_payloads))
-        self.assertTrue(all(set(payload["body"]["context"]) == {"message"} for payload in sent_payloads))
+        sms_payload = next(payload["body"] for payload in sent_payloads if payload["body"]["notification_type"] == "sms")
+        email_payload = next(payload["body"] for payload in sent_payloads if payload["body"]["notification_type"] == "email")
+        self.assertEqual(set(sms_payload["context"]), {"message"})
+        self.assertEqual(set(email_payload["context"]), {"message", "subject"})
+        self.assertTrue(email_payload["context"]["subject"])
         self.assertTrue(all(payload["headers"].get("X-API-KEY") == "notify-key" for payload in sent_payloads))
         self.assertEqual(len(mail.outbox), 0)
 
