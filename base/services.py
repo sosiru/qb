@@ -3240,68 +3240,31 @@ def list_batches(user, organization_id=None, filters=None):
 
 
 def _quick_pay_recipient_rows(payload):
-    print("[quick_pay] Received payload:", payload)
-
-    common_amount_minor = _money_amount(payload.get("amount"))
-    print("[quick_pay] common_amount_minor:", common_amount_minor)
-
+    common_amount_minor = _money_amount(payload.get("amount_minor") if payload.get("amount_minor") is not None else payload.get("amount"))
     rows = []
-    print("[quick_pay] Initialized rows:", rows)
-
     recipients = payload.get("recipients")
-    print("[quick_pay] recipients:", recipients)
-    print("[quick_pay] recipients type:", type(recipients).__name__)
 
     if isinstance(recipients, list):
-        print("[quick_pay] Processing recipients list")
-        print("[quick_pay] Number of recipients:", len(recipients))
-
         if len(recipients) > 1 and any(
-            not isinstance(recipient, dict) or not recipient.get("amount")
+            not isinstance(recipient, dict)
+            or (
+                recipient.get("amount_minor") in (None, "")
+                and recipient.get("amount") in (None, "")
+            )
             for recipient in recipients
         ):
-            print("[quick_pay] ERROR: Missing amount for one or more recipients")
             raise ValidationError("Enter an amount for every selected bill.")
 
-        for index, recipient in enumerate(recipients):
-            print(f"[quick_pay] Processing recipient #{index}:", recipient)
-
+        for recipient in recipients:
             if not isinstance(recipient, dict):
-                print(
-                    f"[quick_pay] Skipping recipient #{index}: "
-                    "recipient is not a dict"
-                )
                 continue
 
             payee_id = recipient.get("payee_id") or recipient.get("id")
-            print(f"[quick_pay] Recipient #{index} payee_id:", payee_id)
-
             raw_amount_minor = recipient.get("amount_minor")
-            print(
-                f"[quick_pay] Recipient #{index} raw amount_minor:",
-                raw_amount_minor,
-            )
-
-            print(
-                f"[quick_pay] Recipient #{index} fallback common_amount_minor:",
-                common_amount_minor,
-            )
-
-            amount_minor = int(
-                raw_amount_minor or common_amount_minor
-            )
-            print(
-                f"[quick_pay] Recipient #{index} resolved amount_minor:",
-                amount_minor,
-            )
-
-            external_reference = (
-                recipient.get("external_reference") or ""
-            ).strip()
-            print(
-                f"[quick_pay] Recipient #{index} external_reference:",
-                external_reference,
-            )
+            if raw_amount_minor in (None, ""):
+                raw_amount_minor = recipient.get("amount")
+            amount_minor = _money_amount(raw_amount_minor if raw_amount_minor not in (None, "") else common_amount_minor)
+            external_reference = (recipient.get("external_reference") or "").strip()
 
             row = {
                 "payee_id": payee_id,
@@ -3309,22 +3272,12 @@ def _quick_pay_recipient_rows(payload):
                 "external_reference": external_reference,
             }
 
-            print(f"[quick_pay] Recipient #{index} final row:", row)
-
             rows.append(row)
-            print("[quick_pay] Current rows:", rows)
 
     elif isinstance(payload.get("payee_ids"), list):
-        print("[quick_pay] Processing payee_ids")
-
         payee_ids = payload["payee_ids"]
-        print("[quick_pay] payee_ids:", payee_ids)
 
         if len(payee_ids) > 1:
-            print(
-                "[quick_pay] ERROR: Multiple payee_ids supplied:",
-                payee_ids,
-            )
             raise ValidationError(
                 "Use recipients with amount_minor for multiple bill payments."
             )
@@ -3338,19 +3291,9 @@ def _quick_pay_recipient_rows(payload):
             for payee_id in payee_ids
         ]
 
-        print("[quick_pay] Rows created from payee_ids:", rows)
-
     elif payload.get("payee_id"):
-        print("[quick_pay] Processing single payee_id")
-
         payee_id = payload.get("payee_id")
-        print("[quick_pay] payee_id:", payee_id)
-
-        external_reference = (
-            payload.get("external_reference") or ""
-        ).strip()
-
-        print("[quick_pay] external_reference:", external_reference)
+        external_reference = (payload.get("external_reference") or "").strip()
 
         rows = [
             {
@@ -3359,37 +3302,16 @@ def _quick_pay_recipient_rows(payload):
                 "external_reference": external_reference,
             }
         ]
-        print("[quick_pay] Single payee rows:", rows)
-    else:
-        print("[quick_pay] No recipients/payee_ids/payee_id found")
-    print("[quick_pay] Rows before filtering:", rows)
     rows = [row for row in rows if row["payee_id"]]
-    print("[quick_pay] Rows after filtering:", rows)
     if not rows:
-        print("[quick_pay] ERROR: No valid payee found")
         raise ValidationError("At least one payee is required.")
-    print("[quick_pay] Checking amounts")
-    for row in rows:
-        print(
-            "[quick_pay] Checking amount:",
-            "payee_id=",
-            row["payee_id"],
-            "amount_minor=",
-            row["amount_minor"],
-        )
     if any(row["amount_minor"] <= 0 for row in rows):
-        print("[quick_pay] ERROR: amount_minor <= 0 found")
         raise ValidationError(
             "amount_minor must be greater than 0 for every recipient."
         )
     payee_ids = [str(row["payee_id"]) for row in rows]
-    print("[quick_pay] payee_ids for duplicate check:", payee_ids)
-    print("[quick_pay] unique payee_ids:", set(payee_ids))
     if len(payee_ids) != len(set(payee_ids)):
-        print("[quick_pay] ERROR: Duplicate payee detected")
         raise ValidationError("Select each bill only once.")
-    print("[quick_pay] Validation successful")
-    print("[quick_pay] Returning rows:", rows)
     return rows
 
 
@@ -3451,7 +3373,9 @@ def quick_pay(user, payload):
     }
     missing_ids = [str(row["payee_id"]) for row in recipient_rows if str(row["payee_id"]) not in payees]
     if missing_ids:
-        raise ValidationError("One or more selected payees could not be found.")
+        raise ValidationError(
+            "We could not find the selected bill recipient. Refresh your bill list and select the bill again."
+        )
     organization = _quick_pay_organization(user, list(payees.values()), payload)
     recipient_names = [payees[str(row["payee_id"])].label for row in recipient_rows]
     default_description = f"Quick pay to {recipient_names[0]}" if len(recipient_names) == 1 else f"Quick pay to {len(recipient_names)} recipients"

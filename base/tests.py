@@ -851,6 +851,43 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(sum(item["amount_minor"] for item in detail["instructions"]), 55000)
         self.assertEqual(sum(item["fee_amount_minor"] for item in detail["instructions"]), 1100)
 
+    def test_quick_pay_accepts_recipient_amount_alias(self):
+        response = self._post(
+            "/api/v1/auth/register/",
+            {
+                "phone_number": "254700000079",
+                "password": "StrongPass123!",
+                "full_name": "Amount Alias User",
+                "account_type": "INDIVIDUAL",
+            },
+        )
+        token = response.json()["token"]
+        payee_id = self._post(
+            "/api/v1/payees/",
+            {
+                "label": "Alias Bill",
+                "payee_type": "PAYBILL",
+                "paybill_number": "777005",
+                "account_reference": "ALIAS-1",
+                "expense_category": "utilities",
+            },
+            token=token,
+        ).json()["payee"]["id"]
+        self._post("/api/v1/wallets/topups/", {"amount_minor": 100, "simulate": True}, token=token)
+
+        response = self._post(
+            "/api/v1/payments/quick-pay/",
+            {
+                "recipients": [{"payee_id": payee_id, "amount": 20}],
+                "payment_mode": "WALLET",
+            },
+            token=token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["batch"]["status"], "SUCCEEDED")
+        self.assertEqual(response.json()["batch"]["total_amount_minor"], 20)
+
     def test_quick_pay_requires_explicit_amounts_for_multiple_bills(self):
         response = self._post(
             "/api/v1/auth/register/",
