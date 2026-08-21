@@ -2180,6 +2180,44 @@ def _queue_instruction_dispatches(batch):
         dispatch_outbox_event_inline(event)
 
 
+def _ensure_batch_payout_transaction(batch):
+    existing_transaction_id = (batch.metadata or {}).get("ledger_transaction_id")
+    if existing_transaction_id:
+        return LedgerTransactionRecord.objects.get(id=existing_transaction_id)
+
+    required_total = _batch_required_total(batch)
+    if required_total <= 0:
+        raise ValidationError("Payout amount must be greater than zero.")
+
+    wallet = _batch_spendable_wallet(batch)
+    reference = generate_transaction_reference()
+    ledger_tx = initiate_payout(
+        wallet,
+        amount_minor=required_total,
+        reference=reference,
+        idempotency_key=_wallet_idempotency_key("batch-disbursement", str(batch.id)),
+        description="Batch disbursement",
+        metadata={
+            "description": "Batch disbursement",
+            "batch_id": str(batch.id),
+            "base_amount_minor": batch.total_amount_minor,
+            "fee_amount_minor": batch.fee_amount_minor,
+            "gross_amount_minor": required_total,
+            "status": "PROCESSING",
+        },
+    )
+    batch.metadata["ledger_transaction_id"] = str(ledger_tx.id)
+    batch.metadata["payout_transaction_status"] = ledger_tx.status
+    batch.save(update_fields=["metadata", "updated_at"])
+    logger.info(
+        "payment.batch.payout_transaction_created batch_id=%s ledger_transaction_id=%s amount_minor=%s",
+        batch.id,
+        ledger_tx.id,
+        required_total,
+    )
+    return ledger_tx
+
+
 class PaymentOrchestrationEngine:
     def __init__(self, batch, actor=None):
         self.batch = batch
@@ -2881,6 +2919,7 @@ def mark_batch_collection_complete(batch, microservice_response):
         to_status=batch.status,
         payload={"collection_response": microservice_response},
     )
+    _ensure_batch_payout_transaction(batch)
     _queue_instruction_dispatches(batch)
     return batch
 

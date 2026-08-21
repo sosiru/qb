@@ -23,7 +23,7 @@ from notifications.services import (
     validate_notification_configuration,
 )
 from reports.models import ReportExport
-from ledger.models import Account, PaymentRequest
+from ledger.models import Account, PaymentRequest, Transaction
 from ledger.services import PaymentService, get_or_create_user_account, initiate_payout, unique_transaction_reference
 
 from .models import (
@@ -1841,6 +1841,25 @@ class QuickBillsPlatformTests(TestCase):
         collection_request = PaymentRequest.objects.get(operation=PaymentRequest.Operation.STK_PUSH, request_payload__metadata__batch_id=batch_id)
         self.assertEqual(collection_request.request_payload["amount_minor"], 153000)
         self.assertEqual(collection_request.request_payload["amount"], 1530.0)
+
+        batch = PaymentBatch.objects.get(id=batch_id)
+        wallet = get_or_create_user_account(batch.user)
+        wallet.refresh_from_db()
+        topup_transaction = collection_request.transaction
+        payout_transaction = Transaction.objects.get(id=batch.metadata["ledger_transaction_id"])
+
+        self.assertEqual(topup_transaction.direction, Transaction.Direction.PAY_IN)
+        self.assertEqual(topup_transaction.status, Transaction.Status.COMPLETED)
+        self.assertEqual(topup_transaction.amount_minor, 153000)
+        self.assertEqual(payout_transaction.direction, Transaction.Direction.PAY_OUT)
+        self.assertEqual(payout_transaction.status, Transaction.Status.PROCESSING)
+        self.assertEqual(payout_transaction.amount_minor, 153000)
+        self.assertEqual(wallet.available_balance_minor, 0)
+        self.assertEqual(wallet.reserved_balance_minor, 153000)
+        self.assertEqual(
+            OutboxEvent.objects.filter(topic="payment.instruction.dispatch", aggregate_type="payment_instruction").count(),
+            1,
+        )
 
     @override_settings(
         NOTIFY_URL="https://notify.example/api/send",
