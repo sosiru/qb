@@ -384,9 +384,9 @@ def _serialize_activity_instruction(instruction):
         "recipient_name": instruction.recipient_name,
         "recipient_type": instruction.recipient_type,
         "category": instruction.category,
-        "base_amount_minor": instruction.amount_minor,
-        "fee_amount_minor": instruction.fee_amount_minor,
-        "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
+        "base_amount_minor": _minor_amount(instruction.amount_minor),
+        "fee_amount_minor": _minor_amount(instruction.fee_amount_minor),
+        "gross_amount_minor": _minor_amount(instruction.amount_minor + instruction.fee_amount_minor),
         "status": instruction.status,
         "reference": receipt_number,
         "receipt_number": receipt_number,
@@ -476,6 +476,11 @@ def amount_minor_to_payment_amount(amount_minor):
 
 def _money_amount(value):
     return Decimal(str(value or "0")).quantize(Decimal("0.01"))
+
+
+def _minor_amount(value):
+    amount = _money_amount(value)
+    return int(amount) if amount == amount.to_integral_value() else float(amount)
 
 
 def build_microservice_request_id(prefix, entity_id):
@@ -2050,7 +2055,7 @@ def _build_destination_from_payee(payee):
 
 def calculate_payout_fee_amount_minor(amount_minor):
     amount = _money_amount(amount_minor)
-    fee_minor = max(Decimal("0.00"), (amount * Decimal(SERVICE_FEE_BPS) / Decimal(10000)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    fee_minor = max(Decimal("0"), (amount * Decimal(SERVICE_FEE_BPS) / Decimal(10000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     logger.info(
         "payment.fee.calculated amount_minor=%s fee_bps=%s fee_amount_minor=%s total_amount_minor=%s",
         amount,
@@ -2830,7 +2835,7 @@ def settle_batch(batch, actor, simulate_collection=True):
                 "gross_amount_minor": required_total,
                 "status": "PROCESSING" if payment_microservice_dispatch_enabled() and not simulate_collection else "SUCCEEDED",
             },
-            reserve=not (payment_microservice_dispatch_enabled() and not simulate_collection),
+            reserve=True,
         )
         batch.metadata["ledger_transaction_id"] = str(ledger_tx.id)
         batch.metadata["orchestration_stage"] = (
@@ -2843,7 +2848,7 @@ def settle_batch(batch, actor, simulate_collection=True):
             "payment.batch.settle.ledger_created batch_id=%s ledger_transaction_id=%s reserve_wallet=%s orchestration_stage=%s",
             batch.id,
             ledger_tx.id,
-            not (payment_microservice_dispatch_enabled() and not simulate_collection),
+            True,
             batch.metadata.get("orchestration_stage"),
         )
         if not payment_microservice_dispatch_enabled() or simulate_collection:
@@ -3501,16 +3506,16 @@ def build_approval_queue(user, organization_id=None):
                 "organization_name": batch.organization.name if batch.organization_id else None,
                 "submitted_by": batch.submitted_by.full_name if batch.submitted_by_id else "",
                 "scheduled_for": batch.scheduled_for.isoformat(),
-                "base_amount_minor": batch.total_amount_minor,
-                "fee_amount_minor": batch.fee_amount_minor,
-                "gross_amount_minor": batch.total_amount_minor + batch.fee_amount_minor,
+                "base_amount_minor": _minor_amount(batch.total_amount_minor),
+                "fee_amount_minor": _minor_amount(batch.fee_amount_minor),
+                "gross_amount_minor": _minor_amount(batch.total_amount_minor + batch.fee_amount_minor),
                 "instruction_count": batch.instructions.count(),
                 "status": batch.status,
                 "sample_instructions": [
                     {
                         "recipient_name": instruction.recipient_name,
                         "recipient_type": instruction.recipient_type,
-                        "amount_minor": instruction.amount_minor,
+                        "amount_minor": _minor_amount(instruction.amount_minor),
                     }
                     for instruction in sample_instructions
                 ],
@@ -3653,10 +3658,10 @@ def build_transaction_summary(user, organization_id=None, filters=None):
     return {
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
-        "opening_balance_minor": opening_balance,
-        "total_debits_minor": total_debits,
-        "total_credits_minor": total_credits,
-        "total_fees_minor": total_fees,
+        "opening_balance_minor": _minor_amount(opening_balance),
+        "total_debits_minor": _minor_amount(total_debits),
+        "total_credits_minor": _minor_amount(total_credits),
+        "total_fees_minor": _minor_amount(total_fees),
         "transaction_count": len(transactions),
         "transactions": transactions,
     }

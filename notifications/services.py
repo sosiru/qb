@@ -42,16 +42,17 @@ class NotificationInterface:
             template=template or settings.NOTIFY_SMS_TEMPLATE,
         )
 
-    def send_email(self, message, recipients, *, unique_identifier=None, template=None):
+    def send_email(self, message, recipients, *, unique_identifier=None, template=None, subject=None):
         return self._send(
             "email",
             message,
             recipients,
             unique_identifier=unique_identifier,
             template=template or settings.NOTIFY_EMAIL_TEMPLATE,
+            subject=subject,
         )
 
-    def _send(self, notification_type, message, recipients, *, unique_identifier=None, template=None):
+    def _send(self, notification_type, message, recipients, *, unique_identifier=None, template=None, subject=None):
         logger.info("Starting notification dispatch.")
         if isinstance(recipients, str):
             recipients = [recipients]
@@ -60,14 +61,17 @@ class NotificationInterface:
         if not recipients:
             logger.error("No recipients provided.")
             raise NotificationDispatchError("No recipients provided.")
+        context = {
+            "message": str(message),
+        }
+        if notification_type == "email" and subject:
+            context["subject"] = str(subject)
         payload = {
             "notification_type": notification_type,
             "template": template,
             "unique_identifier": unique_identifier or str(uuid.uuid4()),
             "recipients": recipients,
-            "context": {
-                "message": str(message),
-            },
+            "context": context,
         }
         logger.info("Payload prepared: %s", payload)
         headers = {
@@ -154,7 +158,19 @@ def notification_channel_enabled(event_type, channel):
 def _merge_context(template, context):
     merged = dict(template.default_context or {})
     merged.update(context or {})
-    return merged
+    return _json_safe_context(merged)
+
+
+def _json_safe_context(value):
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_context(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_context(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_context(item) for item in value]
+    return value
 
 
 MANDATORY_AUTH_EVENT_TYPES = {"SELF_ONBOARDING", "LOGIN_OTP", "PASSWORD_RESET"}
@@ -295,7 +311,8 @@ def _notification_message(event):
 
 def _money_minor(value):
     try:
-        return f"KES {Decimal(str(value or '0')).quantize(Decimal('0.01')):,.2f}"
+        amount = (Decimal(str(value or "0")) / Decimal("100")).quantize(Decimal("0.01"))
+        return f"KES {amount:,.2f}"
     except Exception:
         return "KES 0.00"
 
@@ -668,8 +685,15 @@ def send_notification_event(event):
         raise NotificationDispatchError("Notification provider is not configured.")
 
     interface = NotificationInterface()
-    send = interface.send_email if event.channel == "EMAIL" else interface.send_sms
-    return send(
+    if event.channel == "EMAIL":
+        payload = build_notification_payload(event)
+        return interface.send_email(
+            payload["context"]["message"],
+            event.recipients,
+            unique_identifier=event.unique_identifier,
+            subject=payload["context"].get("subject"),
+        )
+    return interface.send_sms(
         _notification_message(event),
         event.recipients,
         unique_identifier=event.unique_identifier,

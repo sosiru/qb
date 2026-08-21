@@ -1,6 +1,7 @@
 import calendar
 import json
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.core import mail
@@ -469,14 +470,15 @@ class QuickBillsPlatformTests(TestCase):
             metadata={"source": "mpesa"},
         )
         wallet.refresh_from_db()
-        self.assertEqual(wallet.current_balance_minor, 650000)
-        self.assertEqual(wallet.uncleared_balance_minor, 150000)
+        self.assertEqual(wallet.current_balance_minor, 500000)
+        self.assertEqual(wallet.uncleared_balance_minor, 0)
         self.assertEqual(wallet.available_balance_minor, 500000)
         self.assertEqual(entry.status, "PROCESSING")
 
         mark_wallet_entry_cleared(entry.id)
         wallet.refresh_from_db()
         self.assertEqual(wallet.uncleared_balance_minor, 0)
+        self.assertEqual(wallet.current_balance_minor, 650000)
         self.assertEqual(wallet.available_balance_minor, 650000)
         entry.refresh_from_db()
         self.assertEqual(entry.status, "COMPLETED")
@@ -1476,7 +1478,7 @@ class QuickBillsPlatformTests(TestCase):
         PESAWAY_SYSTEM_SLUG="qb",
         PESAWAY_B2C_EVENT_SLUG="b2c",
     )
-    def test_live_wallet_payout_batch_stays_pending_and_debits_only_after_success_callback(self):
+    def test_live_wallet_payout_batch_reserves_and_debits_only_after_success_callback(self):
         response = self._post(
             "/api/v1/auth/register/",
             {
@@ -1522,6 +1524,7 @@ class QuickBillsPlatformTests(TestCase):
                 {"payment_mode": "WALLET", "simulate_collection": False},
                 token=token,
             )
+            call_command("process_outbox")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["batch"]["status"], "PROCESSING")
@@ -1533,9 +1536,9 @@ class QuickBillsPlatformTests(TestCase):
         wallet.refresh_from_db()
         self.assertEqual(instruction.status, PaymentInstruction.Status.PENDING)
         self.assertEqual(request.status, PaymentRequest.Status.PROCESSING)
-        self.assertEqual(wallet.available_balance_minor, 200000)
+        self.assertEqual(wallet.available_balance_minor, 98000)
         self.assertEqual(wallet.current_balance_minor, 200000)
-        self.assertEqual(wallet.reserved_balance_minor, 0)
+        self.assertEqual(wallet.reserved_balance_minor, 102000)
 
         PaymentService().handle_webhook(
             {
@@ -1831,15 +1834,15 @@ class QuickBillsPlatformTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         batch_id = response.json()["batch"]["id"]
-        self.assertEqual(response.json()["batch"]["total_amount_minor"], 150000)
-        self.assertEqual(response.json()["batch"]["fee_amount_minor"], 3000)
-        self.assertEqual(response.json()["batch"]["gross_amount_minor"], 153000)
+        self.assertEqual(int(response.json()["batch"]["total_amount_minor"]), 150000)
+        self.assertEqual(int(response.json()["batch"]["fee_amount_minor"]), 3000)
+        self.assertEqual(int(response.json()["batch"]["gross_amount_minor"]), 153000)
 
         with patch("base.payment_microservice_executor._sandbox_enabled", return_value=True):
             call_command("process_outbox")
 
         collection_request = PaymentRequest.objects.get(operation=PaymentRequest.Operation.STK_PUSH, request_payload__metadata__batch_id=batch_id)
-        self.assertEqual(collection_request.request_payload["amount_minor"], 153000)
+        self.assertEqual(Decimal(str(collection_request.request_payload["amount_minor"])), Decimal("153000.00"))
         self.assertEqual(collection_request.request_payload["amount"], 1530.0)
 
         batch = PaymentBatch.objects.get(id=batch_id)
@@ -1860,6 +1863,14 @@ class QuickBillsPlatformTests(TestCase):
             OutboxEvent.objects.filter(topic="payment.instruction.dispatch", aggregate_type="payment_instruction").count(),
             1,
         )
+
+        PaymentService().handle_webhook(collection_request.response_payload)
+        batch.refresh_from_db()
+        wallet.refresh_from_db()
+        self.assertEqual(Transaction.objects.filter(account=wallet).count(), 2)
+        self.assertEqual(batch.metadata["ledger_transaction_id"], str(payout_transaction.id))
+        self.assertEqual(wallet.available_balance_minor, 0)
+        self.assertEqual(wallet.reserved_balance_minor, 153000)
 
     @override_settings(
         NOTIFY_URL="https://notify.example/api/send",

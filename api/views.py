@@ -98,6 +98,13 @@ def _category_label(slug):
 IDEMPOTENT_MUTATION_TTL_SECONDS = 60
 
 
+def _minor_amount(value):
+    amount = Decimal(str(value or "0"))
+    if amount == amount.to_integral_value():
+        return int(amount)
+    return float(amount)
+
+
 def _client_ip(request):
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
     if forwarded_for:
@@ -228,10 +235,10 @@ def _serialize_wallet(wallet):
         "owner_type": wallet.owner_type,
         "wallet_type": wallet.wallet_type,
         "currency": wallet.currency,
-        "available_balance_minor": wallet.available_balance_minor,
-        "current_balance_minor": getattr(wallet, "current_balance_minor", wallet.available_balance_minor),
-        "reserved_balance_minor": getattr(wallet, "reserved_balance_minor", 0),
-        "uncleared_balance_minor": getattr(wallet, "uncleared_balance_minor", 0),
+        "available_balance_minor": _minor_amount(wallet.available_balance_minor),
+        "current_balance_minor": _minor_amount(getattr(wallet, "current_balance_minor", wallet.available_balance_minor)),
+        "reserved_balance_minor": _minor_amount(getattr(wallet, "reserved_balance_minor", 0)),
+        "uncleared_balance_minor": _minor_amount(getattr(wallet, "uncleared_balance_minor", 0)),
         "user_id": str(wallet.user_id) if wallet.user_id else None,
         "organization_id": str(wallet.organization_id) if wallet.organization_id else None,
         "label": f"{wallet.wallet_type.title()} wallet",
@@ -313,9 +320,9 @@ def _serialize_schedule(schedule):
         "payee_id": str(schedule.payee_id),
         "payee_label": schedule.payee.label,
         "payee_type": schedule.payee.payee_type,
-        "amount_minor": schedule.amount_minor,
-        "fee_amount_minor": fee_amount_minor,
-        "gross_amount_minor": schedule.amount_minor + fee_amount_minor,
+        "amount_minor": _minor_amount(schedule.amount_minor),
+        "fee_amount_minor": _minor_amount(fee_amount_minor),
+        "gross_amount_minor": _minor_amount(schedule.amount_minor + fee_amount_minor),
         "day_of_month": schedule.day_of_month,
         "interval_months": schedule.interval_months,
         "cadence_label": "Every month" if schedule.interval_months == 1 else f"Every {schedule.interval_months} months",
@@ -357,19 +364,19 @@ def _serialize_batch(batch):
         "scheduled_for": batch.scheduled_for.isoformat(),
         "description": batch.description,
         "source_file_name": batch.source_file_name,
-        "total_amount_minor": batch.total_amount_minor,
-        "fee_amount_minor": batch.fee_amount_minor,
-        "gross_amount_minor": batch.total_amount_minor + batch.fee_amount_minor,
+        "total_amount_minor": _minor_amount(batch.total_amount_minor),
+        "fee_amount_minor": _minor_amount(batch.fee_amount_minor),
+        "gross_amount_minor": _minor_amount(batch.total_amount_minor + batch.fee_amount_minor),
         "organization_id": str(batch.organization_id) if batch.organization_id else None,
         "user_id": str(batch.user_id) if batch.user_id else None,
         "instruction_count": batch.instructions.count(),
         "pending_instruction_count": pending_instruction_count,
         "succeeded_instruction_count": succeeded_instruction_count,
         "failed_instruction_count": failed_instruction_count,
-        "bill_total_minor": batch.total_amount_minor,
-        "total_charged_minor": batch.total_amount_minor + batch.fee_amount_minor,
+        "bill_total_minor": _minor_amount(batch.total_amount_minor),
+        "total_charged_minor": _minor_amount(batch.total_amount_minor + batch.fee_amount_minor),
         "collection_status": collection_status,
-        "collection_amount_minor": metadata.get("collection_amount_minor"),
+        "collection_amount_minor": _minor_amount(metadata.get("collection_amount_minor")) if metadata.get("collection_amount_minor") is not None else None,
         "collection_request_id": metadata.get("collection_request_id"),
         "collection_originator_ref": metadata.get("collection_originator_ref"),
         "disbursement_status": (
@@ -468,11 +475,11 @@ def _serialize_ledger_entry(entry):
         "wallet_type": wallet.wallet_type,
         "entry_type": entry_type,
         "direction": entry.direction,
-        "amount_minor": amount_minor,
-        "base_amount_minor": base_amount_minor,
-        "fee_amount_minor": fee_amount_minor,
-        "gross_amount_minor": gross_amount_minor,
-        "balance_after_minor": entry.balance_after_minor,
+        "amount_minor": _minor_amount(amount_minor),
+        "base_amount_minor": _minor_amount(base_amount_minor),
+        "fee_amount_minor": _minor_amount(fee_amount_minor),
+        "gross_amount_minor": _minor_amount(gross_amount_minor),
+        "balance_after_minor": _minor_amount(entry.balance_after_minor),
         "reference": entry.internal_reference,
         "description": entry.description or ledger_description(entry_type, metadata),
         "metadata": metadata,
@@ -492,9 +499,9 @@ def _serialize_instruction(instruction):
         "recipient_type": instruction.recipient_type,
         "recipient_type_label": instruction.get_recipient_type_display(),
         "destination": instruction.destination,
-        "amount_minor": instruction.amount_minor,
-        "fee_amount_minor": instruction.fee_amount_minor,
-        "gross_amount_minor": instruction.amount_minor + instruction.fee_amount_minor,
+        "amount_minor": _minor_amount(instruction.amount_minor),
+        "fee_amount_minor": _minor_amount(instruction.fee_amount_minor),
+        "gross_amount_minor": _minor_amount(instruction.amount_minor + instruction.fee_amount_minor),
         "category": instruction.category,
         "category_label": _category_label(instruction.category),
         "external_reference": instruction.external_reference,

@@ -596,7 +596,7 @@ class PaymentService:
     def __init__(self, *, sandbox=None, base_url=None, api_key=None, timeout=None):
         self.sandbox = getattr(settings, "PAYMENT_MICROSERVICE_SANDBOX", True) if sandbox is None else sandbox
         self.base_url = (base_url or getattr(settings, "PAYMENT_MICROSERVICE_URL", "")).rstrip("/")
-        self.api_key = "PsRdVR9pM4uZXGi-gSeTih7I7_vKwR1Mw_iN7exf2ko"
+        self.api_key = api_key if api_key is not None else getattr(settings, "PAYMENT_MICROSERVICE_API_KEY", "")
         self.timeout = timeout or getattr(settings, "PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", 30)
 
     def initiate_stk_push(self, account, *, amount_minor, phone_number, idempotency_key="", metadata=None):
@@ -650,7 +650,7 @@ class PaymentService:
             amount_minor,
             self.sandbox,
             (destination or {}).get("type") or (destination or {}).get("destination_type") or "",
-            self.sandbox,
+            True,
             sorted((metadata or {}).keys()),
         )
         tx = initiate_payout(
@@ -660,7 +660,7 @@ class PaymentService:
             idempotency_key=idempotency_key,
             description="Payout",
             metadata={**(metadata or {}), "destination": destination or {}},
-            reserve=self.sandbox,
+            reserve=True,
         )
         existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.PAYOUT)
         if existing_request:
@@ -694,7 +694,7 @@ class PaymentService:
                 idempotency_key=idempotency_key,
                 description=f"Payout to {instruction.recipient_name}",
                 metadata={**(metadata or {}), "instruction_id": str(instruction.id), "batch_id": str(instruction.batch_id)},
-                reserve=self.sandbox,
+                reserve=True,
             )
         else:
             tx = transaction_record
@@ -771,13 +771,14 @@ class PaymentService:
             **extra_payload,
         }
         try:
-            payment_request = PaymentRequest.objects.create(
-                transaction=tx,
-                operation=operation,
-                originator_ref=originator_ref,
-                sandbox=self.sandbox,
-                request_payload=_json_safe(stored_payload),
-            )
+            with transaction.atomic():
+                payment_request = PaymentRequest.objects.create(
+                    transaction=tx,
+                    operation=operation,
+                    originator_ref=originator_ref,
+                    sandbox=self.sandbox,
+                    request_payload=_json_safe(stored_payload),
+                )
         except IntegrityError:
             return PaymentRequest.objects.get(originator_ref=originator_ref)
         logger.info(
@@ -1067,6 +1068,7 @@ class PaymentService:
                     reason,
                     microservice_response={"callback": payload, "payment_request_id": str(payment_request.id)},
                 )
+                fail_transaction(tx, reason=reason, response_payload=payload)
             elif batch_collection_id:
                 from base.models import PaymentBatch
                 from base.services import record_batch_failure
@@ -1145,61 +1147,60 @@ class PaymentService:
                     continue
                 if self._status_query_attempt_count(payment_request) >= max_attempts:
                     continue
-            age_seconds = (now - payment_request.created_at).total_seconds()
-            query_error = None
-            queried = False
-            if (
-                query_status
-                and not self.sandbox
-                and self._supports_status_query()
-                and payment_request.request_id
-            ):
-                try:
-                    response_payload = self.query_status(payment_request)
-                    queried = True
-                    payment_request.refresh_from_db()
+                query_error = None
+                queried = False
+                if (
+                    query_status
+                    and not self.sandbox
+                    and self._supports_status_query()
+                    and payment_request.request_id
+                ):
+                    try:
+                        response_payload = self.query_status(payment_request)
+                        queried = True
+                        payment_request.refresh_from_db()
+                        self._record_status_query_attempt(
+                            payment_request,
+                            outcome="TERMINAL" if payment_request.status != PaymentRequest.Status.PROCESSING else "UNKNOWN",
+                            response_payload=response_payload,
+                        )
+                    except Exception as exc:
+                        query_error = exc
+                        payment_request.refresh_from_db()
+                        self._record_status_query_attempt(payment_request, outcome="QUERY_FAILED", error=exc)
+                else:
                     self._record_status_query_attempt(
                         payment_request,
-                        outcome="TERMINAL" if payment_request.status != PaymentRequest.Status.PROCESSING else "UNKNOWN",
-                        response_payload=response_payload,
+                        outcome="STATUS_QUERY_UNAVAILABLE" if not query_status or not self._supports_status_query() else "REQUEST_ID_MISSING",
                     )
-                except Exception as exc:
-                    query_error = exc
-                    payment_request.refresh_from_db()
-                    self._record_status_query_attempt(payment_request, outcome="QUERY_FAILED", error=exc)
-            else:
-                self._record_status_query_attempt(
-                    payment_request,
-                    outcome="STATUS_QUERY_UNAVAILABLE" if not query_status or not self._supports_status_query() else "REQUEST_ID_MISSING",
-                )
-            payment_request.refresh_from_db()
-            if payment_request.status != PaymentRequest.Status.PROCESSING:
-                processed += 1
-                continue
-            attempt_count = self._status_query_attempt_count(payment_request)
-            if attempt_count >= max_attempts:
-                if query_error:
-                    reason = f"Payment status check failed after {attempt_count} attempt(s): {query_error}"
+                payment_request.refresh_from_db()
+                if payment_request.status != PaymentRequest.Status.PROCESSING:
+                    processed += 1
+                    continue
+                attempt_count = self._status_query_attempt_count(payment_request)
+                if attempt_count >= max_attempts:
+                    if query_error:
+                        reason = f"Payment status check failed after {attempt_count} attempt(s): {query_error}"
+                    else:
+                        reason = (
+                            f"Payment request remained unresolved after {attempt_count} status query attempt(s)."
+                        )
+                    self.fail_processing_request(payment_request, reason)
                 else:
-                    reason = (
-                        f"Payment request remained unresolved after {attempt_count} status query attempt(s)."
-                    )
-                self.fail_processing_request(payment_request, reason)
-            else:
-                if query_error:
-                    payment_request.last_error = (
-                        f"Payment status query failed; will retry up to {max_attempts} attempt(s): "
-                        f"{query_error}"
-                    )[:255]
-                elif not queried:
-                    payment_request.last_error = (
-                        "Payment status query is unavailable; awaiting final callback or retry policy exhaustion."
-                    )
-                else:
-                    payment_request.last_error = (
-                        f"Payment is still processing after {query_after_seconds} seconds; awaiting final callback or status response."
-                    )
-                payment_request.save(update_fields=["last_error", "updated_at"])
+                    if query_error:
+                        payment_request.last_error = (
+                            f"Payment status query failed; will retry up to {max_attempts} attempt(s): "
+                            f"{query_error}"
+                        )[:255]
+                    elif not queried:
+                        payment_request.last_error = (
+                            "Payment status query is unavailable; awaiting final callback or retry policy exhaustion."
+                        )
+                    else:
+                        payment_request.last_error = (
+                            f"Payment is still processing after {query_after_seconds} seconds; awaiting final callback or status response."
+                        )
+                    payment_request.save(update_fields=["last_error", "updated_at"])
             processed += 1
         return processed
 
