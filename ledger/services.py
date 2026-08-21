@@ -171,6 +171,7 @@ FIELD_TO_ACCOUNT_ATTR = {
 DEFAULT_PROFILES = {
     "InitiatePayIn": [["credit_account_uncleared", "credit_account_current"]],
     "ApprovePayIn": [["debit_account_uncleared", "credit_account_available"]],
+    "CompletePayIn": [["credit_account_current", "credit_account_available"]],
     "InitiatePayout": [["debit_account_available", "credit_account_reserved"]],
     "ApprovePayout": [["debit_account_current", "debit_account_reserved"]],
     "CompleteUnreservedPayout": [["debit_account_available", "debit_account_current"]],
@@ -454,20 +455,20 @@ def create_processing_transaction(
 def initiate_pay_in(account, *, amount_minor, reference="", idempotency_key="", description="Pay in", metadata=None):
     with transaction.atomic():
         locked = Account.objects.select_for_update().get(pk=account.pk)
-        tx = create_processing_transaction(
-            locked,
-            transaction_type_name="WalletTopup",
-            direction=Transaction.Direction.PAY_IN,
-            amount_minor=amount_minor,
-            payment_method_name="Pay In",
-            internal_reference=reference,
-            idempotency_key=idempotency_key,
-            description=description,
-            metadata=metadata,
-        )
-        execute_profile(tx, locked, amount_minor, "InitiatePayIn", reference=tx.internal_reference, description=description)
-        locked.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
-        return tx
+        try:
+            return create_processing_transaction(
+                locked,
+                transaction_type_name="WalletTopup",
+                direction=Transaction.Direction.PAY_IN,
+                amount_minor=amount_minor,
+                payment_method_name="Pay In",
+                internal_reference=reference,
+                idempotency_key=idempotency_key,
+                description=description,
+                metadata=metadata,
+            )
+        except DuplicateLedgerOperation as exc:
+            return exc.transaction
 
 
 def complete_pay_in(transaction_record, *, response_payload=None, receipt="", confirmation_key=""):
@@ -475,8 +476,11 @@ def complete_pay_in(transaction_record, *, response_payload=None, receipt="", co
         tx = Transaction.objects.select_for_update().select_related("account").get(pk=transaction_record.pk)
         if tx.status == Transaction.Status.COMPLETED:
             return tx
+        if tx.status == Transaction.Status.FAILED:
+            return tx
         account = Account.objects.select_for_update().get(pk=tx.account_id)
-        execute_profile(tx, account, tx.amount_minor, "ApprovePayIn", reference=tx.internal_reference, receipt=receipt, description=tx.description)
+        profile_name = "ApprovePayIn" if account.uncleared_balance_minor >= tx.amount_minor else "CompletePayIn"
+        execute_profile(tx, account, tx.amount_minor, profile_name, reference=tx.internal_reference, receipt=receipt, description=tx.description)
         account.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
         tx.status = Transaction.Status.COMPLETED
         tx.transaction_receipt = receipt or tx.transaction_receipt
@@ -492,17 +496,20 @@ def initiate_payout(account, *, amount_minor, reference="", idempotency_key="", 
     with transaction.atomic():
         locked = Account.objects.select_for_update().get(pk=account.pk)
         metadata = {**(metadata or {}), "wallet_reserved_on_initiate": bool(reserve)}
-        tx = create_processing_transaction(
-            locked,
-            transaction_type_name="WalletWithdrawal",
-            direction=Transaction.Direction.PAY_OUT,
-            amount_minor=amount_minor,
-            payment_method_name="Payout",
-            internal_reference=reference,
-            idempotency_key=idempotency_key,
-            description=description,
-            metadata=metadata,
-        )
+        try:
+            tx = create_processing_transaction(
+                locked,
+                transaction_type_name="WalletWithdrawal",
+                direction=Transaction.Direction.PAY_OUT,
+                amount_minor=amount_minor,
+                payment_method_name="Payout",
+                internal_reference=reference,
+                idempotency_key=idempotency_key,
+                description=description,
+                metadata=metadata,
+            )
+        except DuplicateLedgerOperation as exc:
+            return exc.transaction
         if reserve:
             execute_profile(tx, locked, amount_minor, "InitiatePayout", reference=tx.internal_reference, description=description)
             locked.save(update_fields=["current_balance_minor", "uncleared_balance_minor", "available_balance_minor", "reserved_balance_minor", "updated_at"])
@@ -570,8 +577,9 @@ def transfer_between_accounts(debit_account, credit_account, *, amount_minor, re
 
 
 class PaymentService:
-    STATUS_QUERY_AFTER_SECONDS = 120
+    STATUS_QUERY_AFTER_SECONDS = 300
     PROCESSING_TIMEOUT_SECONDS = 300
+    MAX_STATUS_QUERY_ATTEMPTS = 5
     LIPASYNC_SUCCESS_STATUSES = {"CAPTURED", "COMPLETED", "SETTLED", "SUCCESS"}
     LIPASYNC_FAILURE_STATUSES = {"FAILED", "CANCELLED", "EXPIRED", "DISPUTED", "REFUNDED", "MANUAL_REVIEW"}
     LIPASYNC_PENDING_STATUSES = {
@@ -607,6 +615,9 @@ class PaymentService:
             description="STK push wallet top-up",
             metadata={**(metadata or {}), "phone_number": phone_number},
         )
+        existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.STK_PUSH)
+        if existing_request:
+            return existing_request
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.STK_PUSH,
@@ -625,6 +636,9 @@ class PaymentService:
             description="Pay in",
             metadata=metadata,
         )
+        existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.PAY_IN)
+        if existing_request:
+            return existing_request
         return self._create_or_submit_request(tx, PaymentRequest.Operation.PAY_IN, {}, metadata=metadata)
 
     def initiate_payout(self, account, *, amount_minor, destination=None, idempotency_key="", metadata=None):
@@ -648,6 +662,9 @@ class PaymentService:
             metadata={**(metadata or {}), "destination": destination or {}},
             reserve=self.sandbox,
         )
+        existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.PAYOUT)
+        if existing_request:
+            return existing_request
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.PAYOUT,
@@ -681,6 +698,13 @@ class PaymentService:
             )
         else:
             tx = transaction_record
+        existing_request = self._existing_payment_request(
+            tx,
+            PaymentRequest.Operation.PAYOUT,
+            instruction_id=str(instruction.id),
+        )
+        if existing_request:
+            return existing_request
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.PAYOUT,
@@ -692,9 +716,15 @@ class PaymentService:
                 "recipient_type": instruction.recipient_type,
                 "destination": destination,
             },
-            originator_ref=unique_transaction_reference("REQ"),
+            originator_ref=f"REQ-{str(instruction.id).replace('-', '').upper()[:24]}",
             metadata={**(metadata or {}), "instruction_id": str(instruction.id), "batch_id": str(instruction.batch_id)},
         )
+
+    def _existing_payment_request(self, tx, operation, *, instruction_id=""):
+        queryset = PaymentRequest.objects.filter(transaction=tx, operation=operation).order_by("created_at")
+        if instruction_id:
+            queryset = queryset.filter(request_payload__instruction_id=instruction_id)
+        return queryset.first()
 
     def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None, metadata=None):
         originator_ref = originator_ref or tx.internal_reference
@@ -740,13 +770,16 @@ class PaymentService:
             "metadata": metadata,
             **extra_payload,
         }
-        payment_request = PaymentRequest.objects.create(
-            transaction=tx,
-            operation=operation,
-            originator_ref=originator_ref,
-            sandbox=self.sandbox,
-            request_payload=_json_safe(stored_payload),
-        )
+        try:
+            payment_request = PaymentRequest.objects.create(
+                transaction=tx,
+                operation=operation,
+                originator_ref=originator_ref,
+                sandbox=self.sandbox,
+                request_payload=_json_safe(stored_payload),
+            )
+        except IntegrityError:
+            return PaymentRequest.objects.get(originator_ref=originator_ref)
         logger.info(
             "payment.request.created payment_request_id=%s transaction_id=%s operation=%s provider_path=%s sandbox=%s",
             payment_request.id,
@@ -852,6 +885,59 @@ class PaymentService:
             self.handle_webhook({**response_payload, **normalized_payload})
         return response_payload
 
+    def _payload_amount_minor(self, payload):
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        amount_minor = payload.get("amount_minor") or data.get("amount_minor")
+        if amount_minor not in (None, ""):
+            return _money_amount(amount_minor)
+        amount = payload.get("amount") or data.get("amount")
+        if amount in (None, ""):
+            return None
+        return (_money_amount(amount) * Decimal("100")).quantize(Decimal("0.01"))
+
+    def _validate_terminal_payload(self, payment_request, tx, payload):
+        expected_amount_minor = _money_amount((payment_request.request_payload or {}).get("amount_minor") or tx.amount_minor)
+        actual_amount_minor = self._payload_amount_minor(payload)
+        if actual_amount_minor is not None and actual_amount_minor != expected_amount_minor:
+            raise LedgerError("Payment callback amount does not match the expected transaction amount.")
+        expected_currency = str((payment_request.request_payload or {}).get("currency") or tx.currency or "").upper()
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        actual_currency = str(payload.get("currency") or data.get("currency") or expected_currency or "").upper()
+        if expected_currency and actual_currency and actual_currency != expected_currency:
+            raise LedgerError("Payment callback currency does not match the expected transaction currency.")
+
+    def _record_status_query_attempt(self, payment_request, *, outcome, response_payload=None, error=""):
+        request_payload = dict(payment_request.request_payload or {})
+        attempts = list(request_payload.get("status_query_attempts") or [])
+        attempts.append(
+            {
+                "attempt": len(attempts) + 1,
+                "at": timezone.now().isoformat(),
+                "outcome": outcome,
+                "error": str(error or "")[:255],
+                "response_status": (response_payload or {}).get("status") if isinstance(response_payload, dict) else "",
+            }
+        )
+        request_payload["status_query_attempts"] = attempts
+        payment_request.request_payload = request_payload
+        payment_request.save(update_fields=["request_payload", "updated_at"])
+        try:
+            from base.services import record_transaction_event
+
+            record_transaction_event(
+                "payment_request",
+                payment_request.id,
+                "payment_request.status_query_attempted",
+                microservice_request_id=payment_request.request_id or payment_request.originator_ref,
+                payload=attempts[-1],
+            )
+        except Exception:
+            logger.exception("payment.status_query.audit_failed payment_request_id=%s", payment_request.id)
+        return len(attempts)
+
+    def _status_query_attempt_count(self, payment_request):
+        return len((payment_request.request_payload or {}).get("status_query_attempts") or [])
+
     @transaction.atomic
     def handle_webhook(self, payload):
         normalized_payload = self._normalize_microservice_payload(payload)
@@ -908,6 +994,7 @@ class PaymentService:
             payment_request.save(update_fields=["request_id", "last_error", "response_payload", "updated_at"])
             return payment_request
         success = bool(payload.get("success"))
+        self._validate_terminal_payload(payment_request, tx, payload)
         if success:
             logger.info(
                 "payment.webhook.success payment_request_id=%s transaction_id=%s operation=%s instruction_id=%s batch_collection_id=%s",
@@ -1040,19 +1127,27 @@ class PaymentService:
         *,
         query_after_seconds=STATUS_QUERY_AFTER_SECONDS,
         timeout_seconds=PROCESSING_TIMEOUT_SECONDS,
+        max_attempts=MAX_STATUS_QUERY_ATTEMPTS,
         limit=50,
         query_status=True,
     ):
         now = timezone.now()
         query_cutoff = now - timezone.timedelta(seconds=query_after_seconds)
-        requests = PaymentRequest.objects.filter(
+        request_ids = list(PaymentRequest.objects.filter(
             status=PaymentRequest.Status.PROCESSING,
             created_at__lt=query_cutoff,
-        ).order_by("created_at")[:limit]
+        ).order_by("created_at").values_list("id", flat=True)[:limit])
         processed = 0
-        for payment_request in requests:
+        for payment_request_id in request_ids:
+            with transaction.atomic():
+                payment_request = PaymentRequest.objects.select_for_update().select_related("transaction").get(id=payment_request_id)
+                if payment_request.status != PaymentRequest.Status.PROCESSING:
+                    continue
+                if self._status_query_attempt_count(payment_request) >= max_attempts:
+                    continue
             age_seconds = (now - payment_request.created_at).total_seconds()
             query_error = None
+            queried = False
             if (
                 query_status
                 and not self.sandbox
@@ -1060,32 +1155,49 @@ class PaymentService:
                 and payment_request.request_id
             ):
                 try:
-                    self.query_status(payment_request)
+                    response_payload = self.query_status(payment_request)
+                    queried = True
+                    payment_request.refresh_from_db()
+                    self._record_status_query_attempt(
+                        payment_request,
+                        outcome="TERMINAL" if payment_request.status != PaymentRequest.Status.PROCESSING else "UNKNOWN",
+                        response_payload=response_payload,
+                    )
                 except Exception as exc:
                     query_error = exc
+                    payment_request.refresh_from_db()
+                    self._record_status_query_attempt(payment_request, outcome="QUERY_FAILED", error=exc)
+            else:
+                self._record_status_query_attempt(
+                    payment_request,
+                    outcome="STATUS_QUERY_UNAVAILABLE" if not query_status or not self._supports_status_query() else "REQUEST_ID_MISSING",
+                )
             payment_request.refresh_from_db()
             if payment_request.status != PaymentRequest.Status.PROCESSING:
                 processed += 1
                 continue
-            if age_seconds >= timeout_seconds:
+            attempt_count = self._status_query_attempt_count(payment_request)
+            if attempt_count >= max_attempts:
                 if query_error:
-                    reason = f"Payment status check failed after {timeout_seconds} seconds: {query_error}"
+                    reason = f"Payment status check failed after {attempt_count} attempt(s): {query_error}"
                 else:
                     reason = (
-                        f"Payment request timed out after {timeout_seconds} seconds "
-                        "without a final callback or status response."
+                        f"Payment request remained unresolved after {attempt_count} status query attempt(s)."
                     )
                 self.fail_processing_request(payment_request, reason)
             else:
                 if query_error:
                     payment_request.last_error = (
-                        f"Payment status query failed; will retry until the {timeout_seconds}-second timeout: "
+                        f"Payment status query failed; will retry up to {max_attempts} attempt(s): "
                         f"{query_error}"
                     )[:255]
+                elif not queried:
+                    payment_request.last_error = (
+                        "Payment status query is unavailable; awaiting final callback or retry policy exhaustion."
+                    )
                 else:
                     payment_request.last_error = (
-                        f"Payment is still processing after {query_after_seconds} seconds; "
-                        "awaiting final callback or status response."
+                        f"Payment is still processing after {query_after_seconds} seconds; awaiting final callback or status response."
                     )
                 payment_request.save(update_fields=["last_error", "updated_at"])
             processed += 1
@@ -1336,10 +1448,10 @@ class PaymentService:
         return normalized
 
     def _amount_major(self, amount_minor):
-        return float(_money_amount(amount_minor))
+        return float((_money_amount(amount_minor) / Decimal("100")).quantize(Decimal("0.01")))
 
     def _amount_major_string(self, amount_minor):
-        return str(_money_amount(amount_minor))
+        return str((_money_amount(amount_minor) / Decimal("100")).quantize(Decimal("0.01")))
 
     def _is_pesaway_core(self):
         return self.base_url.rstrip("/").endswith("/api/v1/core")

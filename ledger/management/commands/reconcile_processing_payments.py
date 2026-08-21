@@ -4,11 +4,12 @@ from ledger.services import PaymentService
 
 
 class Command(BaseCommand):
-    help = "Query payment status after two minutes and fail requests still pending after five minutes."
+    help = "Query payment status after five minutes and fail unresolved requests after five attempts."
 
     def add_arguments(self, parser):
         parser.add_argument("--query-after-seconds", type=int, default=PaymentService.STATUS_QUERY_AFTER_SECONDS)
         parser.add_argument("--timeout-seconds", type=int, default=PaymentService.PROCESSING_TIMEOUT_SECONDS)
+        parser.add_argument("--max-attempts", type=int, default=PaymentService.MAX_STATUS_QUERY_ATTEMPTS)
         parser.add_argument("--limit", type=int, default=50)
         parser.add_argument(
             "--query-status",
@@ -36,6 +37,7 @@ class Command(BaseCommand):
         processed = PaymentService(sandbox=sandbox).retry_stale_processing(
             query_after_seconds=options["query_after_seconds"],
             timeout_seconds=options["timeout_seconds"],
+            max_attempts=options["max_attempts"],
             limit=options["limit"],
             query_status=options["query_status"],
         )

@@ -34,7 +34,7 @@ class LedgerServiceTests(TestCase):
         )
         self.account = get_or_create_user_account(self.user)
 
-    def test_pay_in_uses_profiles_to_clear_available_balance(self):
+    def test_pay_in_does_not_credit_wallet_until_success(self):
         tx = initiate_pay_in(
             self.account,
             amount_minor=100000,
@@ -43,8 +43,8 @@ class LedgerServiceTests(TestCase):
         )
 
         self.account.refresh_from_db()
-        self.assertEqual(self.account.current_balance_minor, 100000)
-        self.assertEqual(self.account.uncleared_balance_minor, 100000)
+        self.assertEqual(self.account.current_balance_minor, 0)
+        self.assertEqual(self.account.uncleared_balance_minor, 0)
         self.assertEqual(self.account.available_balance_minor, 0)
 
         complete_pay_in(tx, receipt="RCT-001", confirmation_key="CONF-001")
@@ -52,7 +52,13 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(self.account.current_balance_minor, 100000)
         self.assertEqual(self.account.uncleared_balance_minor, 0)
         self.assertEqual(self.account.available_balance_minor, 100000)
-        self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=tx).count(), 4)
+        self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=tx).count(), 2)
+
+        complete_pay_in(tx, receipt="RCT-001", confirmation_key="CONF-001")
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.current_balance_minor, 100000)
+        self.assertEqual(self.account.available_balance_minor, 100000)
+        self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=tx).count(), 2)
 
     def test_payout_reserves_then_settles(self):
         complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="TOPUP-002"))
@@ -742,12 +748,12 @@ class LedgerServiceTests(TestCase):
         post.assert_not_called()
         payment_request.refresh_from_db()
         tx.refresh_from_db()
-        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
-        self.assertIn("timed out after 300 seconds", payment_request.last_error)
-        self.assertEqual(tx.status, Transaction.Status.FAILED)
-        self.assertIn("timed out after 300 seconds", tx.failure_reason)
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertIn("status query is unavailable", payment_request.last_error)
+        self.assertEqual(tx.status, Transaction.Status.PROCESSING)
+        self.assertEqual(len(payment_request.request_payload["status_query_attempts"]), 1)
 
-    def test_retry_stale_processing_waits_two_minutes_before_status_query(self):
+    def test_retry_stale_processing_waits_five_minutes_before_status_query(self):
         tx = initiate_pay_in(self.account, amount_minor=50000, reference="STK-WAIT-001")
         payment_request = PaymentRequest.objects.create(
             transaction=tx,
@@ -764,7 +770,7 @@ class LedgerServiceTests(TestCase):
             sandbox=False,
         )
         PaymentRequest.objects.filter(id=payment_request.id).update(
-            created_at=timezone.now() - timezone.timedelta(seconds=90)
+            created_at=timezone.now() - timezone.timedelta(minutes=4, seconds=59)
         )
 
         with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
@@ -792,7 +798,7 @@ class LedgerServiceTests(TestCase):
             sandbox=False,
         )
         PaymentRequest.objects.filter(id=payment_request.id).update(
-            created_at=timezone.now() - timezone.timedelta(minutes=4)
+            created_at=timezone.now() - timezone.timedelta(minutes=6)
         )
         status_response = {
             "success": True,
@@ -883,7 +889,7 @@ class LedgerServiceTests(TestCase):
             sandbox=False,
         )
         PaymentRequest.objects.filter(id=payment_request.id).update(
-            created_at=timezone.now() - timezone.timedelta(minutes=4)
+            created_at=timezone.now() - timezone.timedelta(minutes=6)
         )
         status_response = {
             "success": True,
@@ -947,8 +953,9 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(processed, 1)
         post.assert_not_called()
         payment_request.refresh_from_db()
-        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
-        self.assertIn("timed out after 300 seconds", payment_request.last_error)
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertIn("status query is unavailable", payment_request.last_error)
+        self.assertEqual(len(payment_request.request_payload["status_query_attempts"]), 1)
 
     @override_settings(
         PAYMENT_MICROSERVICE_URL="https://payments.lipasync.com/api/v1/core/payments/qb",
@@ -987,8 +994,9 @@ class LedgerServiceTests(TestCase):
         post.assert_not_called()
         payment_request.refresh_from_db()
         tx.refresh_from_db()
-        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
-        self.assertEqual(tx.status, Transaction.Status.FAILED)
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(tx.status, Transaction.Status.PROCESSING)
+        self.assertEqual(len(payment_request.request_payload["status_query_attempts"]), 1)
         self.assertIn("Reconciled 1 processing payment request", stdout.getvalue())
 
     def test_retry_stale_processing_queries_then_fails_live_instruction_after_five_minutes(self):
@@ -1030,13 +1038,13 @@ class LedgerServiceTests(TestCase):
             sandbox=False,
         )
         PaymentRequest.objects.filter(id=payment_request.id).update(
-            created_at=timezone.now() - timezone.timedelta(minutes=4)
+            created_at=timezone.now() - timezone.timedelta(minutes=4, seconds=59)
         )
 
         with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}) as post:
             PaymentService(sandbox=False, base_url="http://payments.example").retry_stale_processing(query_status=True)
 
-        post.assert_called_once()
+        post.assert_not_called()
         payment_request.refresh_from_db()
         instruction.refresh_from_db()
         batch.refresh_from_db()
@@ -1044,7 +1052,7 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(instruction.status, PaymentInstruction.Status.PENDING)
         self.assertEqual(instruction.failure_reason, "")
         self.assertEqual(batch.status, PaymentBatch.Status.PROCESSING)
-        self.assertIn("awaiting final callback or status response", payment_request.last_error)
+        self.assertEqual(payment_request.last_error, "")
 
         PaymentRequest.objects.filter(id=payment_request.id).update(
             created_at=timezone.now() - timezone.timedelta(minutes=6)
@@ -1056,7 +1064,72 @@ class LedgerServiceTests(TestCase):
         payment_request.refresh_from_db()
         instruction.refresh_from_db()
         batch.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(instruction.status, PaymentInstruction.Status.PENDING)
+        self.assertEqual(instruction.failure_reason, "")
+        self.assertEqual(batch.status, PaymentBatch.Status.PROCESSING)
+        self.assertEqual(len(payment_request.request_payload["status_query_attempts"]), 1)
+
+    def test_retry_stale_processing_fails_after_five_unknown_status_queries_and_releases_reservation(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=150000, reference="FUND-QUERY-EXHAUSTED"))
+        tx = initiate_payout(self.account, amount_minor=100000, reference="PAYOUT-QUERY-EXHAUSTED")
+        batch = PaymentBatch.objects.create(
+            batch_kind=PaymentBatch.BatchKind.INDIVIDUAL_ADHOC,
+            status=PaymentBatch.Status.PROCESSING,
+            payment_mode=PaymentBatch.PaymentMode.WALLET,
+            user=self.user,
+            scheduled_for=timezone.localdate(),
+            total_amount_minor=100000,
+        )
+        instruction = PaymentInstruction.objects.create(
+            batch=batch,
+            recipient_name="Retry Recipient",
+            recipient_type="MOBILE",
+            destination={"phone_number": "254711222333"},
+            amount_minor=100000,
+            category="family",
+        )
+        payment_request = PaymentRequest.objects.create(
+            transaction=tx,
+            operation=PaymentRequest.Operation.PAYOUT,
+            originator_ref="REQ-QUERY-EXHAUSTED",
+            request_id="MS-PAYOUT-QUERY-EXHAUSTED",
+            request_payload={
+                "originator_ref": "REQ-QUERY-EXHAUSTED",
+                "amount_minor": 100000,
+                "currency": "KES",
+                "operation": PaymentRequest.Operation.PAYOUT,
+                "instruction_id": str(instruction.id),
+                "batch_id": str(batch.id),
+                "recipient_name": instruction.recipient_name,
+                "recipient_type": instruction.recipient_type,
+                "destination": instruction.destination,
+                "status_query_attempts": [
+                    {"attempt": 1, "outcome": "UNKNOWN"},
+                    {"attempt": 2, "outcome": "UNKNOWN"},
+                    {"attempt": 3, "outcome": "UNKNOWN"},
+                    {"attempt": 4, "outcome": "UNKNOWN"},
+                ],
+            },
+            response_payload={"status": "PROCESSING"},
+            sandbox=False,
+        )
+        PaymentRequest.objects.filter(id=payment_request.id).update(
+            created_at=timezone.now() - timezone.timedelta(minutes=6)
+        )
+
+        with patch.object(PaymentService, "_post", return_value={"status": "PROCESSING"}):
+            PaymentService(sandbox=False, base_url="http://payments.example").retry_stale_processing(query_status=True)
+
+        payment_request.refresh_from_db()
+        tx.refresh_from_db()
+        instruction.refresh_from_db()
+        batch.refresh_from_db()
+        self.account.refresh_from_db()
         self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(instruction.status, PaymentInstruction.Status.FAILED)
-        self.assertIn("timed out after 300 seconds", instruction.failure_reason)
         self.assertEqual(batch.status, PaymentBatch.Status.FAILED)
+        self.assertEqual(self.account.available_balance_minor, 150000)
+        self.assertEqual(self.account.reserved_balance_minor, 0)
+        self.assertEqual(len(payment_request.request_payload["status_query_attempts"]), 5)

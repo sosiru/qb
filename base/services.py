@@ -2820,7 +2820,7 @@ def settle_batch(batch, actor, simulate_collection=True):
             wallet,
             amount_minor=required_total,
             reference=reference,
-            idempotency_key=_wallet_idempotency_key("batch-disbursement", reference),
+            idempotency_key=_wallet_idempotency_key("batch-disbursement", str(batch.id)),
             description="Batch disbursement",
             metadata={
                 "description": "Batch disbursement",

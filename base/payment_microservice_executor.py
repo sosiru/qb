@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.conf import settings
 import requests
 from base.models import PaymentBatch, PaymentInstruction
-from ledger.models import Transaction as LedgerTransactionRecord
+from ledger.models import PaymentRequest, Transaction as LedgerTransactionRecord
 from ledger.services import PaymentService, get_or_create_user_account
 from base.services import mark_batch_collection_complete, process_kplc_payout_notification, record_batch_failure, record_instruction_failure
 
@@ -43,6 +43,7 @@ def request_collection_for_batch(batch_id, payload=None):
         account,
         amount_minor=amount_minor,
         phone_number=payload.get("phone_number") or actor.phone_number,
+        idempotency_key=f"quick-pay-stk-collection:{batch.id}",
         metadata={
             "batch_id": str(batch.id),
             "purpose": "batch_collection",
@@ -56,11 +57,13 @@ def request_collection_for_batch(batch_id, payload=None):
         payment_request.request_id,
         payment_request.status,
     )
+    batch.refresh_from_db()
     batch.metadata["collection_request_id"] = payment_request.request_id
     batch.metadata["collection_originator_ref"] = payment_request.originator_ref
-    batch.metadata["collection_status"] = payment_request.status
+    if batch.metadata.get("collection_status") != "SUCCEEDED":
+        batch.metadata["collection_status"] = payment_request.status
     batch.save(update_fields=["metadata", "updated_at"])
-    if payment_request.status == payment_request.Status.COMPLETED:
+    if payment_request.status == payment_request.Status.COMPLETED and batch.metadata.get("collection_status") != "SUCCEEDED":
         mark_batch_collection_complete(batch, payment_request.response_payload)
     return payment_request.response_payload
 
@@ -131,8 +134,44 @@ def fail_instruction_event(event, exc):
             )
             return
         instruction = PaymentInstruction.objects.get(id=event.aggregate_id)
+        processing_request = PaymentRequest.objects.filter(
+            operation=PaymentRequest.Operation.PAYOUT,
+            request_payload__instruction_id=str(instruction.id),
+            status=PaymentRequest.Status.PROCESSING,
+        ).exists()
+        if processing_request:
+            instruction.microservice_response = {
+                **(instruction.microservice_response or {}),
+                "dispatch_error": str(exc),
+                "dispatch_status": "UNKNOWN",
+            }
+            instruction.save(update_fields=["microservice_response", "updated_at"])
+            logger.warning(
+                "payment_executor.instruction.dispatch_unknown instruction_id=%s event_id=%s error=%s",
+                instruction.id,
+                event.id,
+                exc,
+            )
+            return
         record_instruction_failure(instruction, str(exc), microservice_response={"error": str(exc)})
         return
     if event.aggregate_type == "payment_batch":
         batch = PaymentBatch.objects.get(id=event.aggregate_id)
+        if event.topic == "collection.stk.requested":
+            processing_request = PaymentRequest.objects.filter(
+                operation=PaymentRequest.Operation.STK_PUSH,
+                request_payload__metadata__batch_id=str(batch.id),
+                status=PaymentRequest.Status.PROCESSING,
+            ).exists()
+            if processing_request:
+                batch.metadata["collection_status"] = "UNKNOWN"
+                batch.metadata["collection_dispatch_error"] = str(exc)[:255]
+                batch.save(update_fields=["metadata", "updated_at"])
+                logger.warning(
+                    "payment_executor.collection.dispatch_unknown batch_id=%s event_id=%s error=%s",
+                    batch.id,
+                    event.id,
+                    exc,
+                )
+                return
         record_batch_failure(batch, str(exc))
