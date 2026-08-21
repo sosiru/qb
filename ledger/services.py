@@ -381,6 +381,12 @@ def execute_profile(transaction_record, account, amount_minor, balance_entry_typ
     processor_class = PROCESSORS.get(profile.name)
     if not processor_class:
         raise LedgerError(f"No processor registered for {profile.name}.")
+    previous_snapshot = {
+        "current_balance_minor": account.current_balance_minor,
+        "available_balance_minor": account.available_balance_minor,
+        "reserved_balance_minor": account.reserved_balance_minor,
+        "uncleared_balance_minor": account.uncleared_balance_minor,
+    }
     balance_log = BalanceLog.objects.create(
         transaction=transaction_record,
         balance_entry_type=balance_entry_type,
@@ -398,10 +404,39 @@ def execute_profile(transaction_record, account, amount_minor, balance_entry_typ
                 getattr(processor, command.name)(account=account, balance_log=balance_log, amount_minor=amount_minor)
             if rule.sleep_seconds:
                 time.sleep(rule.sleep_seconds)
+        new_snapshot = {
+            "current_balance_minor": account.current_balance_minor,
+            "available_balance_minor": account.available_balance_minor,
+            "reserved_balance_minor": account.reserved_balance_minor,
+            "uncleared_balance_minor": account.uncleared_balance_minor,
+        }
         balance_log.status = BalanceLog.Status.COMPLETED
         balance_log.state = get_state(COMPLETED)
         balance_log.total_balance_minor = account.available_balance_minor
-        balance_log.save(update_fields=["status", "state", "total_balance_minor", "updated_at"])
+        balance_log.metadata = _json_safe(
+            {
+                **(balance_log.metadata or {}),
+                "wallet_id": str(account.id),
+                "transaction_id": str(transaction_record.id),
+                "transaction_type": transaction_record.transaction_type.name,
+                "amount_minor": amount_minor,
+                "currency": transaction_record.currency,
+                "direction": transaction_record.direction,
+                "previous_balance_minor": previous_snapshot["current_balance_minor"],
+                "new_balance_minor": new_snapshot["current_balance_minor"],
+                "previous_available_balance_minor": previous_snapshot["available_balance_minor"],
+                "new_available_balance_minor": new_snapshot["available_balance_minor"],
+                "previous_reserved_balance_minor": previous_snapshot["reserved_balance_minor"],
+                "new_reserved_balance_minor": new_snapshot["reserved_balance_minor"],
+                "previous_uncleared_balance_minor": previous_snapshot["uncleared_balance_minor"],
+                "new_uncleared_balance_minor": new_snapshot["uncleared_balance_minor"],
+                "external_payment_reference": transaction_record.request_id or transaction_record.internal_reference,
+                "idempotency_key": transaction_record.idempotency_key,
+                "source_event": (metadata or {}).get("source_event") or balance_entry_type_name,
+                "status": balance_log.status,
+            }
+        )
+        balance_log.save(update_fields=["status", "state", "total_balance_minor", "metadata", "updated_at"])
         return balance_log
     except Exception:
         balance_log.status = BalanceLog.Status.FAILED
@@ -519,7 +554,7 @@ def initiate_payout(account, *, amount_minor, reference="", idempotency_key="", 
 def complete_payout(transaction_record, *, response_payload=None, receipt="", confirmation_key=""):
     with transaction.atomic():
         tx = Transaction.objects.select_for_update().select_related("account").get(pk=transaction_record.pk)
-        if tx.status == Transaction.Status.COMPLETED:
+        if tx.status in {Transaction.Status.COMPLETED, Transaction.Status.FAILED}:
             return tx
         account = Account.objects.select_for_update().get(pk=tx.account_id)
         reserved_on_initiate = (tx.metadata or {}).get("wallet_reserved_on_initiate", True)
@@ -599,7 +634,7 @@ class PaymentService:
         self.api_key = api_key if api_key is not None else getattr(settings, "PAYMENT_MICROSERVICE_API_KEY", "")
         self.timeout = timeout or getattr(settings, "PAYMENT_MICROSERVICE_TIMEOUT_SECONDS", 30)
 
-    def initiate_stk_push(self, account, *, amount_minor, phone_number, idempotency_key="", metadata=None):
+    def initiate_stk_push(self, account, *, amount_minor, phone_number, idempotency_key="", metadata=None, submit=True):
         logger.info(
             "payment.stk_push.initiate account_id=%s amount_minor=%s sandbox=%s metadata_keys=%s",
             account.id,
@@ -617,12 +652,13 @@ class PaymentService:
         )
         existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.STK_PUSH)
         if existing_request:
-            return existing_request
+            return self._submit_payment_request(existing_request) if submit else existing_request
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.STK_PUSH,
             {"phone_number": phone_number},
             metadata=metadata,
+            submit=submit,
         )
 
     def initiate_pay_in(self, account, *, amount_minor, idempotency_key="", metadata=None):
@@ -638,7 +674,7 @@ class PaymentService:
         )
         existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.PAY_IN)
         if existing_request:
-            return existing_request
+            return self._submit_payment_request(existing_request)
         return self._create_or_submit_request(tx, PaymentRequest.Operation.PAY_IN, {}, metadata=metadata)
 
     def initiate_payout(self, account, *, amount_minor, destination=None, idempotency_key="", metadata=None):
@@ -664,7 +700,7 @@ class PaymentService:
         )
         existing_request = self._existing_payment_request(tx, PaymentRequest.Operation.PAYOUT)
         if existing_request:
-            return existing_request
+            return self._submit_payment_request(existing_request)
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.PAYOUT,
@@ -704,7 +740,7 @@ class PaymentService:
             instruction_id=str(instruction.id),
         )
         if existing_request:
-            return existing_request
+            return self._submit_payment_request(existing_request)
         return self._create_or_submit_request(
             tx,
             PaymentRequest.Operation.PAYOUT,
@@ -726,7 +762,7 @@ class PaymentService:
             queryset = queryset.filter(request_payload__instruction_id=instruction_id)
         return queryset.first()
 
-    def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None, metadata=None):
+    def _create_or_submit_request(self, tx, operation, extra_payload, *, originator_ref=None, metadata=None, submit=True):
         originator_ref = originator_ref or tx.internal_reference
         metadata = metadata or tx.metadata or {}
         request_amount_minor = _money_amount(extra_payload.get("amount_minor") or tx.amount_minor)
@@ -766,6 +802,7 @@ class PaymentService:
             "currency": tx.currency,
             "operation": operation,
             "payment_payload": provider_payload.get("payment_payload") or provider_payload.get("provider_payload") or {},
+            "provider_payload": provider_payload,
             "provider_path": provider_path,
             "metadata": metadata,
             **extra_payload,
@@ -789,52 +826,70 @@ class PaymentService:
             provider_path or "sandbox",
             self.sandbox,
         )
-        if self.sandbox:
-            response_payload = {
-                "success": True,
-                "originator_ref": originator_ref,
-                "request_id": f"SIM-{secrets.token_hex(5).upper()}",
-                "transaction_receipt": f"SIM-{secrets.token_hex(5).upper()}",
-                "confirmation_key": secrets.token_hex(12),
-            }
-            payment_request.request_id = response_payload["request_id"]
-            payment_request.response_payload = response_payload
-            payment_request.save(update_fields=["request_id", "response_payload", "updated_at"])
-            self._sync_transaction_request_id(payment_request, tx, payment_request.request_id)
-            logger.info(
-                "payment.request.sandbox_callback payment_request_id=%s request_id=%s originator_ref=%s",
-                payment_request.id,
-                payment_request.request_id,
-                originator_ref,
-            )
-            self.handle_webhook(response_payload)
-            payment_request.refresh_from_db()
+        if not submit:
             return payment_request
-        logger.info(
-            "payment.request.submit payment_request_id=%s operation=%s provider_path=%s originator_ref=%s",
-            payment_request.id,
-            operation,
-            provider_path,
-            originator_ref,
-        )
-        response_payload = self._post(provider_path, provider_payload)
-        normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
-        logger.info(
-            "payment.request.submitted payment_request_id=%s provider_request_id=%s normalized_status=%s terminal=%s",
-            payment_request.id,
-            normalized_payload.get("request_id") or "",
-            normalized_payload.get("status") or "",
-            "success" in normalized_payload,
-        )
-        payment_request.response_payload = response_payload
-        payment_request.request_id = normalized_payload.get("request_id") or ""
-        payment_request.save(update_fields=["response_payload", "request_id", "updated_at"])
-        self._sync_transaction_request_id(payment_request, tx, payment_request.request_id)
-        if "success" in normalized_payload and (
-            operation != PaymentRequest.Operation.PAYOUT or normalized_payload["success"] is False
-        ):
-            self.handle_webhook({**response_payload, **normalized_payload})
-            payment_request.refresh_from_db()
+        return self._submit_payment_request(payment_request, tx=tx)
+
+    def _submit_payment_request(self, payment_request, *, tx=None):
+        with transaction.atomic():
+            payment_request = PaymentRequest.objects.select_for_update().select_related("transaction").get(pk=payment_request.pk)
+            if payment_request.status in {PaymentRequest.Status.COMPLETED, PaymentRequest.Status.FAILED}:
+                return payment_request
+            if payment_request.request_id and payment_request.response_payload:
+                return payment_request
+            tx = tx or payment_request.transaction
+            request_payload = payment_request.request_payload or {}
+            operation = payment_request.operation
+            provider_path = request_payload.get("provider_path") or ""
+            provider_payload = request_payload.get("provider_payload") or {}
+            if not provider_payload:
+                raise LedgerError("Payment request is missing provider payload and cannot be submitted.")
+            if self.sandbox:
+                response_payload = {
+                    "success": True,
+                    "originator_ref": payment_request.originator_ref,
+                    "request_id": f"SIM-{secrets.token_hex(5).upper()}",
+                    "transaction_receipt": f"SIM-{secrets.token_hex(5).upper()}",
+                    "confirmation_key": secrets.token_hex(12),
+                }
+                payment_request.request_id = response_payload["request_id"]
+                payment_request.response_payload = response_payload
+                payment_request.save(update_fields=["request_id", "response_payload", "updated_at"])
+                self._sync_transaction_request_id(payment_request, tx, payment_request.request_id)
+                logger.info(
+                    "payment.request.sandbox_callback payment_request_id=%s request_id=%s originator_ref=%s",
+                    payment_request.id,
+                    payment_request.request_id,
+                    payment_request.originator_ref,
+                )
+                self.handle_webhook(response_payload)
+                payment_request.refresh_from_db()
+                return payment_request
+            logger.info(
+                "payment.request.submit payment_request_id=%s operation=%s provider_path=%s originator_ref=%s",
+                payment_request.id,
+                operation,
+                provider_path,
+                payment_request.originator_ref,
+            )
+            response_payload = self._post(provider_path, provider_payload)
+            normalized_payload = self._normalize_microservice_payload(response_payload, payment_request=payment_request)
+            logger.info(
+                "payment.request.submitted payment_request_id=%s provider_request_id=%s normalized_status=%s terminal=%s",
+                payment_request.id,
+                normalized_payload.get("request_id") or "",
+                normalized_payload.get("status") or "",
+                "success" in normalized_payload,
+            )
+            payment_request.response_payload = response_payload
+            payment_request.request_id = normalized_payload.get("request_id") or ""
+            payment_request.save(update_fields=["response_payload", "request_id", "updated_at"])
+            self._sync_transaction_request_id(payment_request, tx, payment_request.request_id)
+            if "success" in normalized_payload and (
+                operation != PaymentRequest.Operation.PAYOUT or normalized_payload["success"] is False
+            ):
+                self.handle_webhook({**response_payload, **normalized_payload})
+                payment_request.refresh_from_db()
         return payment_request
 
     def query_status(self, payment_request):

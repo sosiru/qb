@@ -1837,16 +1837,32 @@ class QuickBillsPlatformTests(TestCase):
         self.assertEqual(int(response.json()["batch"]["total_amount_minor"]), 150000)
         self.assertEqual(int(response.json()["batch"]["fee_amount_minor"]), 3000)
         self.assertEqual(int(response.json()["batch"]["gross_amount_minor"]), 153000)
+        collection_request = PaymentRequest.objects.get(operation=PaymentRequest.Operation.STK_PUSH, request_payload__metadata__batch_id=batch_id)
+        batch = PaymentBatch.objects.get(id=batch_id)
+        wallet = get_or_create_user_account(batch.user)
+        wallet.refresh_from_db()
+        self.assertEqual(collection_request.status, PaymentRequest.Status.PROCESSING)
+        self.assertEqual(collection_request.transaction.status, Transaction.Status.PROCESSING)
+        self.assertEqual(collection_request.transaction.direction, Transaction.Direction.PAY_IN)
+        self.assertEqual(collection_request.transaction.amount_minor, 153000)
+        self.assertEqual(collection_request.request_id, "")
+        self.assertNotIn("ledger_transaction_id", batch.metadata)
+        self.assertEqual(wallet.current_balance_minor, 0)
+        self.assertEqual(wallet.available_balance_minor, 0)
+        self.assertEqual(wallet.reserved_balance_minor, 0)
+        self.assertEqual(
+            OutboxEvent.objects.filter(topic="payment.instruction.dispatch", aggregate_type="payment_instruction").count(),
+            0,
+        )
 
         with patch("base.payment_microservice_executor._sandbox_enabled", return_value=True):
             call_command("process_outbox")
 
-        collection_request = PaymentRequest.objects.get(operation=PaymentRequest.Operation.STK_PUSH, request_payload__metadata__batch_id=batch_id)
+        collection_request.refresh_from_db()
         self.assertEqual(Decimal(str(collection_request.request_payload["amount_minor"])), Decimal("153000.00"))
         self.assertEqual(collection_request.request_payload["amount"], 1530.0)
 
-        batch = PaymentBatch.objects.get(id=batch_id)
-        wallet = get_or_create_user_account(batch.user)
+        batch.refresh_from_db()
         wallet.refresh_from_db()
         topup_transaction = collection_request.transaction
         payout_transaction = Transaction.objects.get(id=batch.metadata["ledger_transaction_id"])

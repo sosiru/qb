@@ -2111,6 +2111,27 @@ def _queue_batch_wallet_collection(batch, actor, amount_minor, *, reason):
     batch.metadata["collection_reason"] = reason
     batch.metadata["collection_phone_number"] = phone_number
     batch.save(update_fields=["status", "metadata", "updated_at"])
+    if batch.organization_id:
+        collection_account = get_or_create_organization_account(batch.organization)
+    else:
+        collection_account = get_or_create_user_account(collection_actor)
+    collection_sandbox = (not payment_microservice_dispatch_enabled()) or bool(getattr(settings, "PAYMENT_MICROSERVICE_SANDBOX", False))
+    collection_request = PaymentService(sandbox=collection_sandbox).initiate_stk_push(
+        collection_account,
+        amount_minor=amount_minor,
+        phone_number=phone_number,
+        idempotency_key=f"quick-pay-stk-collection:{batch.id}",
+        metadata={
+            "batch_id": str(batch.id),
+            "purpose": "batch_collection",
+            "funding_reason": reason,
+        },
+        submit=False,
+    )
+    batch.metadata["collection_request_id"] = collection_request.request_id
+    batch.metadata["collection_originator_ref"] = collection_request.originator_ref
+    batch.metadata["collection_transaction_id"] = str(collection_request.transaction_id)
+    batch.save(update_fields=["metadata", "updated_at"])
     record_transaction_event(
         "payment_batch",
         batch.id,

@@ -11,7 +11,7 @@ from django.utils import timezone
 from base.models import PaymentBatch, PaymentInstruction
 from eusers.models import User
 
-from .models import Account, BalanceLogEntry, PaymentRequest, Transaction
+from .models import Account, BalanceLog, BalanceLogEntry, PaymentRequest, Transaction
 from .services import (
     IdempotencyConflict,
     LedgerError,
@@ -53,6 +53,22 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(self.account.uncleared_balance_minor, 0)
         self.assertEqual(self.account.available_balance_minor, 100000)
         self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=tx).count(), 2)
+        balance_log = BalanceLog.objects.get(transaction=tx)
+        self.assertEqual(balance_log.metadata["wallet_id"], str(self.account.id))
+        self.assertEqual(balance_log.metadata["transaction_id"], str(tx.id))
+        self.assertEqual(balance_log.metadata["transaction_type"], "WalletTopup")
+        self.assertEqual(balance_log.metadata["amount_minor"], "100000.00")
+        self.assertEqual(balance_log.metadata["currency"], "KES")
+        self.assertEqual(balance_log.metadata["direction"], Transaction.Direction.PAY_IN)
+        self.assertEqual(balance_log.metadata["previous_balance_minor"], "0.00")
+        self.assertEqual(balance_log.metadata["new_balance_minor"], "100000.00")
+        self.assertEqual(balance_log.metadata["previous_available_balance_minor"], "0.00")
+        self.assertEqual(balance_log.metadata["new_available_balance_minor"], "100000.00")
+        self.assertEqual(balance_log.metadata["previous_reserved_balance_minor"], "0.00")
+        self.assertEqual(balance_log.metadata["new_reserved_balance_minor"], "0.00")
+        self.assertEqual(balance_log.metadata["external_payment_reference"], "TOPUP-001")
+        self.assertEqual(balance_log.metadata["idempotency_key"], "topup-key-001")
+        self.assertEqual(balance_log.metadata["source_event"], "CompletePayIn")
 
         complete_pay_in(tx, receipt="RCT-001", confirmation_key="CONF-001")
         self.account.refresh_from_db()
@@ -552,6 +568,60 @@ class LedgerServiceTests(TestCase):
         self.assertEqual(payment_request.last_error, "Recipient account could not be credited")
         self.assertEqual(self.account.available_balance_minor, 100000)
         self.assertEqual(self.account.reserved_balance_minor, 0)
+
+    @override_settings(
+        PESAWAY_SYSTEM_SLUG="qb",
+        PESAWAY_B2C_EVENT_SLUG="b2c",
+    )
+    def test_late_success_after_failed_payout_does_not_consume_released_reservation(self):
+        complete_pay_in(initiate_pay_in(self.account, amount_minor=100000, reference="FUND-PESAWAY-LATE-SUCCESS"))
+        with patch.object(
+            PaymentService,
+            "_post",
+            return_value={
+                "success": True,
+                "data": {"outbound_transfer_id": "OUT-LATE-SUCCESS-001", "status": "QUEUED"},
+            },
+        ):
+            payment_request = PaymentService(
+                sandbox=False,
+                base_url="https://payments.lipasync.com/api/v1/core",
+            ).initiate_payout(
+                self.account,
+                amount_minor=75000,
+                destination={"phone_number": "254700900001"},
+            )
+
+        PaymentService().handle_webhook(
+            {
+                "event": "outbound_transfer.failed",
+                "outbound_transfer_id": "OUT-LATE-SUCCESS-001",
+                "status": "FAILED",
+                "external_reference": payment_request.originator_ref,
+                "failure_reason": "Recipient account could not be credited",
+            }
+        )
+        entry_count = BalanceLogEntry.objects.filter(balance_log__transaction=payment_request.transaction).count()
+
+        PaymentService().handle_webhook(
+            {
+                "event": "outbound_transfer.completed",
+                "outbound_transfer_id": "OUT-LATE-SUCCESS-001",
+                "status": "COMPLETED",
+                "external_reference": payment_request.originator_ref,
+                "amount": "750.00",
+                "currency": "KES",
+            }
+        )
+
+        payment_request.refresh_from_db()
+        payment_request.transaction.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(payment_request.status, PaymentRequest.Status.FAILED)
+        self.assertEqual(payment_request.transaction.status, Transaction.Status.FAILED)
+        self.assertEqual(self.account.available_balance_minor, 100000)
+        self.assertEqual(self.account.reserved_balance_minor, 0)
+        self.assertEqual(BalanceLogEntry.objects.filter(balance_log__transaction=payment_request.transaction).count(), entry_count)
 
     @override_settings(
         PESAWAY_SYSTEM_SLUG="qb",
